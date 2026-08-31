@@ -1,0 +1,3 @@
+CREATE POLICY invitations_insert ON public.invitations FOR INSERT TO authenticated WITH CHECK (public.has_permission(auth.uid(), 'invitations:create:all'));
+CREATE POLICY invitations_update ON public.invitations FOR UPDATE TO authenticated USING (public.has_permission(auth.uid(), 'invitations:create:all')) WITH CHECK (public.has_permission(auth.uid(), 'invitations:create:all'));
+CREATE POLICY audit_insert_self ON public.audit_logs FOR INSERT TO authenticated WITH CHECK (actor_id = auth.uid());

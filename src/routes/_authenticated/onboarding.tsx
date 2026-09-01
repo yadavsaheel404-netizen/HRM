@@ -151,6 +151,13 @@ function OnboardingPage() {
               <Field label="Work email">
                 <Input value={profile?.work_email ?? ""} disabled />
               </Field>
+              <Field label="Employee ID">
+                <Input
+                  value={profile?.employee_code || "Assigned when your account is provisioned"}
+                  disabled
+                  className="font-mono font-medium"
+                />
+              </Field>
               <Field label="Personal email" required>
                 <Input
                   type="email"

@@ -188,3 +188,17 @@ export const runInvitationDispatch = createServerFn({ method: "POST" })
     const { dispatchInvitationBatch } = await import("./invitations.server");
     return dispatchInvitationBatch();
   });
+
+/** Read-only preview of the next incremental employee ID for the invitation form. */
+export const getNextEmployeeIdPreview = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    await requirePermission(context.supabase, context.userId, "invitations:create:all");
+    const { data, error } = await context.supabase.rpc("peek_next_employee_id");
+    if (error) {
+      console.warn("[invitations] Failed to peek next employee id:", error);
+      return "TAS-001";
+    }
+    return (data as string) || "TAS-001";
+  });
+

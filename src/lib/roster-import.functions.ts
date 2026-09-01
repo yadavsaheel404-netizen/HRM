@@ -2,7 +2,6 @@ import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { requirePermission } from "./actor.server";
 import {
-  generateEmployeeCode,
   summariseRoster,
   validateRoster,
   type RosterRaw,
@@ -70,7 +69,6 @@ export type RosterCommitResult = {
   email: string;
   outcome: "created" | "skipped" | "failed";
   reason: string;
-  employeeCode: string | null;
 };
 
 /**
@@ -95,16 +93,6 @@ export const commitRosterImport = createServerFn({ method: "POST" })
 
     const validated = validateRoster(data.rows, await buildLookups(supabase));
 
-    // Next free auto-code, so blank Custom Employee IDs still get one.
-    const { data: coded } = await supabase
-      .from("profiles")
-      .select("employee_code")
-      .not("employee_code", "is", null);
-    let sequence = (coded ?? []).reduce((max: number, row: { employee_code: string | null }) => {
-      const m = /^TAS-\d{4}-(\d{4})$/.exec(row.employee_code ?? "");
-      return m ? Math.max(max, Number(m[1])) : max;
-    }, 0);
-
     const batchId = crypto.randomUUID();
     const expiresAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
     const results: RosterCommitResult[] = [];
@@ -117,12 +105,9 @@ export const commitRosterImport = createServerFn({ method: "POST" })
           email: row.email,
           outcome: "skipped",
           reason: row.errors.join(" "),
-          employeeCode: null,
         });
         continue;
       }
-
-      const employeeCode = row.employeeCode ?? generateEmployeeCode(row.joiningDate, ++sequence);
 
       const { error } = await supabase.from("invitations").insert({
         email: row.email,
@@ -141,7 +126,6 @@ export const commitRosterImport = createServerFn({ method: "POST" })
           mobile: row.phone,
           joiningDate: row.joiningDate,
           lastWorkingDay: row.lastWorkingDate,
-          employeeCode,
         } as never,
       });
 
@@ -151,7 +135,6 @@ export const commitRosterImport = createServerFn({ method: "POST" })
         email: row.email,
         outcome: error ? "failed" : "created",
         reason: error ? error.message : row.warnings.join(" "),
-        employeeCode: error ? null : employeeCode,
       });
     }
 

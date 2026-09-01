@@ -58,10 +58,31 @@ async function provisionInvitedUser(params: {
     lastWorkingDay?: string | null;
     employeeCode?: string | null;
   };
+
+  // Check if profile already exists to preserve existing employee code if already claimed
+  const { data: existingProfile } = await supabaseAdmin
+    .from("profiles")
+    .select("employee_code")
+    .eq("id", params.userId)
+    .maybeSingle();
+
+  let employeeCode = existingProfile?.employee_code;
+  if (!employeeCode) {
+    // Atomically claim the next system-assigned sequential ID (e.g. TAS-001)
+    const { data: claimedId, error: claimError } =
+      await supabaseAdmin.rpc("claim_next_employee_id");
+    if (claimError) {
+      console.error("[invitations] Failed to claim next employee ID:", claimError);
+    }
+    employeeCode = claimedId ?? null;
+  }
+
+  const fullName = params.fullName ?? params.email.split("@")[0]!;
+
   await supabaseAdmin.from("profiles").upsert(
     {
       id: params.userId,
-      full_name: params.fullName ?? params.email.split("@")[0]!,
+      full_name: fullName,
       work_email: params.email,
       category: params.category as never,
       designation: params.designation,
@@ -74,7 +95,7 @@ async function provisionInvitedUser(params: {
       mobile: meta.mobile ?? null,
       joining_date: meta.joiningDate ?? null,
       last_working_day: meta.lastWorkingDay ?? null,
-      employee_code: meta.employeeCode ?? null,
+      employee_code: employeeCode,
     },
     { onConflict: "id" },
   );
@@ -82,6 +103,19 @@ async function provisionInvitedUser(params: {
   await supabaseAdmin
     .from("user_roles")
     .upsert({ user_id: params.userId, role: params.role as never }, { onConflict: "user_id,role" });
+
+  // Dispatch Welcome Email (idempotent, records welcome_email_sent_at)
+  if (employeeCode) {
+    const { sendWelcomeEmailForProvisionedUser } = await import("./emails/send-welcome.server");
+    void sendWelcomeEmailForProvisionedUser({
+      userId: params.userId,
+      fullName,
+      workEmail: params.email,
+      employeeCode,
+      category: params.category,
+      role: params.role,
+    });
+  }
 }
 
 /**

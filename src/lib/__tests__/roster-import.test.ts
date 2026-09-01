@@ -29,15 +29,15 @@ describe("parseRosterDate", () => {
 
 describe("validateRoster", () => {
   const raw = gridToRosterRaw([
-    ["Full Name", "Work Email", "Phone Number", "Employment Type", "Designation", "Department", "Joining Date", "Last Working Date", "Reporting Lead Email", "Custom Employee ID"],
-    ["Valid Person", "valid@example.com", "9999", "FULL_TIME", "Analyst", "Operations", "2026-09-01", "", "lead@example.com", "X-1"],
-    ["Dup One", "dup@example.com", "", "INTERN", "Intern", "", "01/09/2026", "", "lead@example.com", ""],
-    ["Dup Two", "dup@example.com", "", "INTERN", "Intern", "", "01/09/2026", "", "lead@example.com", ""],
-    ["Bad Type", "bad@example.com", "", "CONTRACT", "Analyst", "", "2026-09-01", "", "lead@example.com", ""],
-    ["", "missing@example.com", "", "FULL_TIME", "Analyst", "", "2026-09-01", "", "lead@example.com", ""],
-    ["Existing", "taken@example.com", "", "FULL_TIME", "Analyst", "", "2026-09-01", "", "lead@example.com", ""],
-    ["Pending", "pending@example.com", "", "FULL_TIME", "Analyst", "", "2026-09-01", "", "lead@example.com", ""],
-    ["Warn Person", "warn@example.com", "", "TRAINER", "Trainer", "Nowhere", "2026-09-01", "", "ghost@example.com", ""],
+    ["Full Name", "Work Email", "Phone Number", "Employment Type", "Designation", "Department", "Joining Date", "Last Working Date", "Reporting Lead Email"],
+    ["Valid Person", "valid@example.com", "9999", "FULL_TIME", "Analyst", "Operations", "2026-09-01", "", "lead@example.com"],
+    ["Dup One", "dup@example.com", "", "INTERN", "Intern", "", "01/09/2026", "", "lead@example.com"],
+    ["Dup Two", "dup@example.com", "", "INTERN", "Intern", "", "01/09/2026", "", "lead@example.com"],
+    ["Bad Type", "bad@example.com", "", "CONTRACT", "Analyst", "", "2026-09-01", "", "lead@example.com"],
+    ["", "missing@example.com", "", "FULL_TIME", "Analyst", "", "2026-09-01", "", "lead@example.com"],
+    ["Existing", "taken@example.com", "", "FULL_TIME", "Analyst", "", "2026-09-01", "", "lead@example.com"],
+    ["Pending", "pending@example.com", "", "FULL_TIME", "Analyst", "", "2026-09-01", "", "lead@example.com"],
+    ["Warn Person", "warn@example.com", "", "TRAINER", "Trainer", "Nowhere", "2026-09-01", "", "ghost@example.com"],
   ]);
   const rows = validateRoster(raw, lookups);
 

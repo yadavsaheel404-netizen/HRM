@@ -7,11 +7,13 @@ import { actorQueryOptions, useActor } from "@/hooks/use-actor";
 import { errorToAccessScreen } from "@/components/access-denied";
 import {
   enqueueInvitations,
+  getNextEmployeeIdPreview,
   listInvitations,
   requeueInvitation,
   revokeInvitation,
   runInvitationDispatch,
 } from "@/lib/invitations.functions";
+import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -50,6 +52,11 @@ function InvitationsPage() {
   const { data: invitations } = useSuspenseQuery({
     queryKey: ["invitations"],
     queryFn: () => listInvitations(),
+  });
+  const { data: nextIdPreview } = useQuery({
+    queryKey: ["next-employee-id-preview"],
+    queryFn: () => getNextEmployeeIdPreview(),
+    enabled: canCreate,
   });
   const [busy, setBusy] = useState(false);
   const [form, setForm] = useState({
@@ -191,6 +198,17 @@ function InvitationsPage() {
                   value={form.designation}
                   onChange={(e) => setForm({ ...form, designation: e.target.value })}
                 />
+              </div>
+              <div className="rounded-md border border-border/80 bg-muted/40 p-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-medium text-muted-foreground">Employee ID</span>
+                  <Badge variant="secondary" className="font-mono text-xs font-semibold">
+                    {nextIdPreview ?? "TAS-001"}
+                  </Badge>
+                </div>
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  Preview only · Assigned automatically in sequence on account provisioning.
+                </p>
               </div>
               <Button type="submit" disabled={busy} className="w-full">
                 Add to queue

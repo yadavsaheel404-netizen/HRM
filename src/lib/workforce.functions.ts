@@ -338,3 +338,146 @@ export const getProfileDocuments = createServerFn({ method: "GET" })
     if (error) throw error;
     return documents ?? [];
   });
+
+/** Option A: Send Supabase built-in password reset email (Super Admin, Admin, HR). */
+export const sendEmployeePasswordResetEmail = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { userId: string }) => {
+    if (!input?.userId) throw new Error("User ID is required.");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const { supabase, userId } = context;
+    await requirePermission(supabase, userId, "workforce:update:all");
+
+    const { data: profile, error: profileError } = await supabase
+      .from("profiles")
+      .select("id, work_email, full_name")
+      .eq("id", data.userId)
+      .maybeSingle();
+
+    if (profileError || !profile?.work_email) {
+      throw new Error("Could not find employee profile or email.");
+    }
+
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { error: resetError } = await supabaseAdmin.auth.resetPasswordForEmail(
+      profile.work_email,
+      {
+        redirectTo: `${process.env['SITE_URL'] || process.env['VITE_SITE_URL'] || "https://hrm.theaischool.co"}/auth`,
+      },
+    );
+
+    if (resetError) {
+      throw new Error(`Failed to dispatch reset email: ${resetError.message}`);
+    }
+
+    const { writeAudit } = await import("./audit.server");
+    await writeAudit(supabase, {
+      actorId: userId,
+      action: "password.reset_email_sent",
+      entityType: "user",
+      entityId: data.userId,
+      detail: { email: profile.work_email, method: "email_reset_link" },
+    });
+
+    return { ok: true, email: profile.work_email };
+  });
+
+/** Option B: Set temporary password directly (Super Admin ONLY). Never logged. */
+export const setEmployeeTemporaryPassword = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { userId: string; temporaryPassword?: string }) => {
+    if (!input?.userId) throw new Error("User ID is required.");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const { supabase, userId } = context;
+
+    // Strict security check: Super Admin only
+    const { data: actorRoles } = await supabase
+      .from("user_roles")
+      .select("role")
+      .eq("user_id", userId);
+
+    const isSuperAdmin = (actorRoles ?? []).some((r) => r.role === "super_admin");
+    if (!isSuperAdmin) {
+      throw new Error("Forbidden: Setting direct temporary passwords is restricted to Super Admin.");
+    }
+
+    const { data: profile, error: profileError } = await supabase
+      .from("profiles")
+      .select("id, work_email, full_name")
+      .eq("id", data.userId)
+      .maybeSingle();
+
+    if (profileError || !profile?.work_email) {
+      throw new Error("Could not find employee profile.");
+    }
+
+    const tempPassword =
+      data.temporaryPassword?.trim() || `TAS-Temp-${crypto.randomUUID().slice(0, 8)}`;
+
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { error: updateError } = await supabaseAdmin.auth.admin.updateUserById(data.userId, {
+      password: tempPassword,
+    });
+
+    if (updateError) {
+      throw new Error(`Failed to update password: ${updateError.message}`);
+    }
+
+    // Flag that the user must change password on their next login
+    await supabaseAdmin
+      .from("profiles")
+      .update({ must_change_password: true } as never)
+      .eq("id", data.userId);
+
+    // Write audit log WITHOUT recording the password value
+    const { writeAudit } = await import("./audit.server");
+    await writeAudit(supabase, {
+      actorId: userId,
+      action: "password.temporary_password_set",
+      entityType: "user",
+      entityId: data.userId,
+      detail: { email: profile.work_email, method: "temporary_password_admin_override" },
+    });
+
+    return { ok: true, temporaryPassword: tempPassword, email: profile.work_email };
+  });
+
+/** Enforced password change when must_change_password is true. */
+export const changeMustChangePassword = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { newPassword: string }) => {
+    if (!input?.newPassword || input.newPassword.length < 6) {
+      throw new Error("New password must be at least 6 characters.");
+    }
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const { supabase, userId } = context;
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+
+    const { error } = await supabaseAdmin.auth.admin.updateUserById(userId, {
+      password: data.newPassword,
+    });
+    if (error) throw new Error(error.message);
+
+    await supabaseAdmin
+      .from("profiles")
+      .update({ must_change_password: false } as never)
+      .eq("id", userId);
+
+    const { writeAudit } = await import("./audit.server");
+    await writeAudit(supabase, {
+      actorId: userId,
+      action: "password.changed_by_user",
+      entityType: "user",
+      entityId: userId,
+      detail: { reason: "must_change_password_cleared" },
+    });
+
+    return { ok: true };
+  });
+

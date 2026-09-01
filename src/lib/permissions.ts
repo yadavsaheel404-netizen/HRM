@@ -139,6 +139,7 @@ export type Actor = {
   category: UserCategory;
   roles: AppRole[];
   permissions: PermissionKey[];
+  mustChangePassword?: boolean;
 };
 
 export function actorCan(actor: Actor | null | undefined, permission: PermissionKey): boolean {

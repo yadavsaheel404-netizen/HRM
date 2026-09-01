@@ -2,6 +2,8 @@ import { createFileRoute, Outlet, redirect } from "@tanstack/react-router";
 import { Suspense } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { errorToAccessScreen } from "@/components/access-denied";
+import { useActor } from "@/hooks/use-actor";
+import { ForcePasswordChangeDialog } from "@/components/auth/force-password-change-dialog";
 
 export const Route = createFileRoute("/_authenticated")({
   ssr: false,
@@ -15,6 +17,8 @@ export const Route = createFileRoute("/_authenticated")({
 });
 
 function AuthenticatedLayout() {
+  const actor = useActor();
+
   return (
     <Suspense
       fallback={
@@ -23,6 +27,7 @@ function AuthenticatedLayout() {
         </div>
       }
     >
+      <ForcePasswordChangeDialog open={actor.mustChangePassword === true} />
       <Outlet />
     </Suspense>
   );

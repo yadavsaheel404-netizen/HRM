@@ -191,7 +191,7 @@ function RosterImportPage() {
           <CardHeader>
             <CardTitle className="text-base">1 · Upload the roster</CardTitle>
             <CardDescription>
-              CSV or Excel with the template columns. Nothing is written until you press Import.
+              CSV or Excel with the template columns. Employee IDs (TAS-001, ...) are automatically assigned sequentially on account provisioning.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-2">
@@ -344,7 +344,6 @@ function RosterImportPage() {
                       { key: "name", header: "Full Name", value: (r) => r.fullName },
                       { key: "email", header: "Work Email", value: (r) => r.email },
                       { key: "outcome", header: "Outcome", value: (r) => r.outcome },
-                      { key: "code", header: "Employee ID", value: (r) => r.employeeCode ?? "" },
                       { key: "reason", header: "Reason", value: (r) => r.reason },
                     ]),
                   )

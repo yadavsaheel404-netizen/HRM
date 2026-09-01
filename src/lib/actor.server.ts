@@ -35,7 +35,7 @@ export async function loadActor(supabase: Client, userId: string): Promise<Actor
     await Promise.all([
       supabase
         .from("profiles")
-        .select("id, full_name, work_email, account_status, category")
+        .select("id, full_name, work_email, account_status, category, must_change_password")
         .eq("id", userId)
         .maybeSingle(),
       supabase.from("user_roles").select("role").eq("user_id", userId),
@@ -58,6 +58,7 @@ export async function loadActor(supabase: Client, userId: string): Promise<Actor
     permissions: ((permissionRows ?? []) as { permission_key: string }[]).map(
       (p) => p.permission_key as PermissionKey,
     ),
+    mustChangePassword: profile?.must_change_password === true,
   };
 }
 

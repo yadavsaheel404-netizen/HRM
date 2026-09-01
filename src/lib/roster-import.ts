@@ -13,7 +13,6 @@ export const ROSTER_COLUMNS = [
   "Joining Date",
   "Last Working Date",
   "Reporting Lead Email",
-  "Custom Employee ID",
 ] as const;
 
 export type RosterColumn = (typeof ROSTER_COLUMNS)[number];
@@ -40,7 +39,6 @@ export const TEMPLATE_SAMPLE_ROWS: string[][] = [
     "2026-09-01",
     "",
     "",
-    "",
   ],
   [
     "Diya Menon",
@@ -52,7 +50,6 @@ export const TEMPLATE_SAMPLE_ROWS: string[][] = [
     "01/09/2026",
     "",
     "aarav.sharma@example.com",
-    "TAS-0421",
   ],
   [
     "Rohit Verma",
@@ -62,7 +59,6 @@ export const TEMPLATE_SAMPLE_ROWS: string[][] = [
     "Annotation Specialist",
     "Delivery",
     "15th Sep 2026",
-    "",
     "",
     "",
   ],
@@ -88,7 +84,6 @@ export type RosterRow = {
   lastWorkingDate: string | null;
   reportingLeadEmail: string | null;
   reportingLeadId: string | null;
-  employeeCode: string | null;
   errors: string[];
   warnings: string[];
   severity: RosterSeverity;
@@ -167,8 +162,6 @@ const HEADER_ALIASES: Record<string, RosterColumn> = {
   "joining date": "Joining Date",
   "last working date": "Last Working Date",
   "reporting lead email": "Reporting Lead Email",
-  "custom employee id": "Custom Employee ID",
-  "employee id": "Custom Employee ID",
 };
 
 /** Turns a raw grid (first row = headers) into keyed rows. */
@@ -271,8 +264,6 @@ export function validateRoster(rows: RosterRaw[], lookups: RosterLookups): Roste
       warnings.push("No reporting lead — the account will need one before requests can route.");
     }
 
-    const employeeCode = (raw["Custom Employee ID"] ?? "").trim() || null;
-
     return {
       rowNumber: index + 1,
       raw,
@@ -288,7 +279,6 @@ export function validateRoster(rows: RosterRaw[], lookups: RosterLookups): Roste
       lastWorkingDate,
       reportingLeadEmail: leadEmailRaw || null,
       reportingLeadId,
-      employeeCode,
       errors,
       warnings,
       severity: errors.length > 0 ? "error" : warnings.length > 0 ? "warning" : "valid",
@@ -304,10 +294,4 @@ export function summariseRoster(rows: RosterRow[]) {
     error: rows.filter((r) => r.severity === "error").length,
     importable: rows.filter((r) => r.severity !== "error").length,
   };
-}
-
-/** Auto-generated when the admin leaves Custom Employee ID blank. */
-export function generateEmployeeCode(joiningDate: string | null, sequence: number): string {
-  const year = (joiningDate ?? new Date().toISOString().slice(0, 10)).slice(0, 4);
-  return `TAS-${year}-${String(sequence).padStart(4, "0")}`;
 }

@@ -17,8 +17,6 @@ export const Route = createFileRoute("/_authenticated")({
 });
 
 function AuthenticatedLayout() {
-  const actor = useActor();
-
   return (
     <Suspense
       fallback={
@@ -27,7 +25,6 @@ function AuthenticatedLayout() {
         </div>
       }
     >
-      <ForcePasswordChangeDialog open={actor.mustChangePassword === true} />
       <Outlet />
     </Suspense>
   );

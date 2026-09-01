@@ -88,8 +88,10 @@ function InvitationsPage() {
       toast.success("Queued. The worker will send it shortly.");
       setForm({ ...form, email: "", fullName: "", designation: "" });
       await queryClient.invalidateQueries();
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Could not queue that invitation.");
+    } catch (error: any) {
+      console.error("[invitations] handleSingleSubmit error:", error);
+      const msg = error?.message || error?.error || (typeof error === "string" ? error : JSON.stringify(error)) || "Could not queue that invitation.";
+      toast.error(msg);
     } finally {
       setBusy(false);
     }

@@ -28,6 +28,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ROLE_LABELS, type AppRole, type PermissionKey } from "@/lib/permissions";
 import { cn } from "@/lib/utils";
+import { ForcePasswordChangeDialog } from "@/components/auth/force-password-change-dialog";
 
 type NavItem = {
   to: string;
@@ -127,6 +128,7 @@ export function AppShell({
 
   return (
     <div className="flex min-h-screen bg-background">
+      <ForcePasswordChangeDialog open={actor.mustChangePassword === true} />
       <aside className="hidden w-60 shrink-0 flex-col border-r border-sidebar-border bg-sidebar py-4 lg:flex">
         <div className="mb-6 flex items-center gap-2.5 px-5">
           <Logo variant="light" className="h-7" />

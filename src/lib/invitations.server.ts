@@ -74,7 +74,7 @@ async function provisionInvitedUser(params: {
     if (claimError) {
       console.error("[invitations] Failed to claim next employee ID:", claimError);
     }
-    employeeCode = claimedId ?? null;
+    employeeCode = (claimedId as unknown as string) ?? null;
   }
 
   const fullName = params.fullName ?? params.email.split("@")[0]!;

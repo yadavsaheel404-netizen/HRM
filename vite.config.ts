@@ -31,6 +31,47 @@ export default defineConfig({
         }
         
         patchDir(outputDir);
+
+        if (process.env.VERCEL) {
+          const vercelDir = path.resolve(".vercel/output");
+          if (fs.existsSync(vercelDir)) {
+            const configJsonPath = path.join(vercelDir, "config.json");
+            if (!fs.existsSync(configJsonPath)) {
+              fs.writeFileSync(
+                configJsonPath,
+                JSON.stringify(
+                  {
+                    version: 3,
+                    routes: [
+                      { handle: "filesystem" },
+                      { src: "/(.*)", dest: "/__server" },
+                    ],
+                  },
+                  null,
+                  2
+                ),
+                "utf8"
+              );
+            }
+
+            const vcConfigPath = path.join(outputDir, ".vc-config.json");
+            if (!fs.existsSync(vcConfigPath)) {
+              fs.writeFileSync(
+                vcConfigPath,
+                JSON.stringify(
+                  {
+                    runtime: "nodejs22.x",
+                    handler: "index.mjs",
+                    launcherType: "Nodejs",
+                  },
+                  null,
+                  2
+                ),
+                "utf8"
+              );
+            }
+          }
+        }
       },
     },
   },

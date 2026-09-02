@@ -11,6 +11,51 @@ export default defineConfig({
         const outputDir = nitro.options.output.serverDir || path.resolve(".vercel/output/functions/__server.func");
         if (!fs.existsSync(outputDir)) return;
         
+        function patchFileContent(content: string): string {
+          // 1. Hoist __defProp definitions
+          content = content.replace(
+            /var (__defProp(?:\$[0-9]+)?)\s*=\s*Object\.defineProperty\s*;?/g,
+            "function $1(target, name, desc) { return Object.defineProperty(target, name, desc); }"
+          );
+
+          // 2. Hoist __name definitions
+          content = content.replace(
+            /var (__name(?:\$[0-9]+)?)\s*=\s*\((target,\s*value)\)\s*=>\s*[^;]+;/g,
+            "function $1(target, value) { return Object.defineProperty(target, 'name', { value, configurable: true }); }"
+          );
+
+          // 3. Hoist __exportAll definitions and use Object.defineProperty directly
+          content = content.replace(
+            /var __exportAll\s*=\s*\(all,\s*no_symbols\)\s*=>\s*\{[\s\S]*?\n\};/g,
+            `function __exportAll(all, no_symbols) {
+	let target = {};
+	for (var name in all) Object.defineProperty(target, name, { get: all[name], enumerable: true });
+	if (!no_symbols) Object.defineProperty(target, Symbol.toStringTag, { value: "Module" });
+	return target;
+};`
+          );
+
+          // 4. Hoist __commonJSMin correctly
+          content = content.replace(
+            /var __commonJSMin\s*=\s*\(cb,\s*mod\)\s*=>\s*\(\)\s*=>\s*\(([\s\S]*?)\);/g,
+            "function __commonJSMin(cb, mod) { return () => ($1); }"
+          );
+
+          // 5. Hoist __toESM correctly
+          content = content.replace(
+            /var __toESM\s*=\s*\(mod,\s*isNodeMode,\s*target\)\s*=>\s*\(([\s\S]*?)\);/g,
+            "function __toESM(mod, isNodeMode, target) { return ($1); }"
+          );
+
+          // 6. Hoist __copyProps correctly
+          content = content.replace(
+            /var __copyProps\s*=\s*\(to,\s*from,\s*except,\s*desc\)\s*=>\s*\{([\s\S]*?)\n\};/g,
+            "function __copyProps(to, from, except, desc) {$1\n};"
+          );
+
+          return content;
+        }
+
         function patchDir(dir: string) {
           const entries = fs.readdirSync(dir, { withFileTypes: true });
           for (const entry of entries) {
@@ -18,13 +63,10 @@ export default defineConfig({
             if (entry.isDirectory()) {
               patchDir(fullPath);
             } else if (entry.name.endsWith(".mjs") || entry.name.endsWith(".js")) {
-              let content = fs.readFileSync(fullPath, "utf8");
-              if (content.includes("var __exportAll = (all, no_symbols) =>")) {
-                content = content.replace(
-                  /var __exportAll = \(all, no_symbols\) =>/g,
-                  "function __exportAll(all, no_symbols)"
-                );
-                fs.writeFileSync(fullPath, content, "utf8");
+              const original = fs.readFileSync(fullPath, "utf8");
+              const patched = patchFileContent(original);
+              if (patched !== original) {
+                fs.writeFileSync(fullPath, patched, "utf8");
               }
             }
           }

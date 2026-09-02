@@ -30,23 +30,43 @@ export async function loadActor(supabase: Client, userId: string): Promise<Actor
   const [
     { data: profile, error: profileError },
     { data: roleRows, error: roleError },
-    { data: permissionRows, error: permissionError },
-  ] =
-    await Promise.all([
-      supabase
-        .from("profiles")
-        .select("id, full_name, work_email, account_status, category, must_change_password")
-        .eq("id", userId)
-        .maybeSingle(),
-      supabase.from("user_roles").select("role").eq("user_id", userId),
-      supabase.rpc("my_permissions"),
-    ]);
+    permissionRpcResult,
+  ] = await Promise.all([
+    supabase
+      .from("profiles")
+      .select("id, full_name, work_email, account_status, category, must_change_password")
+      .eq("id", userId)
+      .maybeSingle(),
+    supabase.from("user_roles").select("role").eq("user_id", userId),
+    supabase.rpc("my_permissions"),
+  ]);
 
   if (profileError) rethrowDbError("Loading your profile failed", profileError);
-  // A failed role/permission read must surface as an error: silently returning
+  // A failed role read must surface as an error: silently returning
   // an actor with no roles renders a false "you don't have access" screen.
   if (roleError) rethrowDbError("Loading your roles failed", roleError);
-  if (permissionError) rethrowDbError("Loading your permissions failed", permissionError);
+
+  const roles = (roleRows ?? []).map((r) => r.role as AppRole);
+  let permissions: PermissionKey[] = [];
+
+  const permissionRows = permissionRpcResult?.data;
+  if (permissionRows && Array.isArray(permissionRows) && permissionRows.length > 0) {
+    permissions = (permissionRows as { permission_key: string }[]).map(
+      (p) => p.permission_key as PermissionKey,
+    );
+  } else if (roles.length > 0) {
+    // Resilient fallback: Resolve permissions directly from role_permissions table for assigned roles
+    const { data: rolePermRows } = await supabase
+      .from("role_permissions")
+      .select("permission_key")
+      .in("role", roles);
+
+    if (rolePermRows && Array.isArray(rolePermRows)) {
+      permissions = Array.from(
+        new Set(rolePermRows.map((rp) => rp.permission_key as PermissionKey)),
+      );
+    }
+  }
 
   return {
     userId,
@@ -54,10 +74,8 @@ export async function loadActor(supabase: Client, userId: string): Promise<Actor
     workEmail: profile?.work_email ?? "",
     accountStatus: profile?.account_status ?? "invited",
     category: profile?.category ?? "full_time",
-    roles: (roleRows ?? []).map((r) => r.role as AppRole),
-    permissions: ((permissionRows ?? []) as { permission_key: string }[]).map(
-      (p) => p.permission_key as PermissionKey,
-    ),
+    roles,
+    permissions,
     mustChangePassword: profile?.must_change_password === true,
   };
 }

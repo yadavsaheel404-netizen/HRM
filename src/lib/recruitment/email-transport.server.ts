@@ -346,6 +346,7 @@ export type SendEmailPayload = {
   text?: string | undefined;
   replyTo?: string | undefined;
   idempotencyKey: string;
+  attachments?: Mail.Attachment[] | undefined;
 };
 
 export type SendEmailTransportResult =
@@ -724,6 +725,10 @@ export function createHostingerSmtpTransport(
         for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
           attemptsUsed = attempt;
           try {
+            const combinedAttachments = [
+              ...(inlineAttachments ?? []),
+              ...(payload.attachments ?? []),
+            ];
             const info = await transporter.sendMail({
               from: config.senderDisplay,
               to: recipientCheck.normalized,
@@ -731,7 +736,7 @@ export function createHostingerSmtpTransport(
               subject: cleanSubject,
               html: outgoingHtml,
               ...(payload.text ? { text: payload.text } : {}),
-              ...(inlineAttachments ? { attachments: inlineAttachments } : {}),
+              ...(combinedAttachments.length > 0 ? { attachments: combinedAttachments } : {}),
               headers: {
                 "X-Entity-Ref-ID": sanitizeEmailHeaderValue(payload.idempotencyKey).slice(0, 128),
               },

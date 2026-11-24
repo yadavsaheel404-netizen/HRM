@@ -285,6 +285,7 @@ export function WorkforceTable({
                 paginated.map((person) => {
                   const primaryRole = (person.roles[0] as AppRole) ?? "employee";
                   const isInactive = person.employment_status === "inactive";
+                  const isRelieved = (person.employment_status as any) === "relieved";
 
                   return (
                     <tr
@@ -355,7 +356,9 @@ export function WorkforceTable({
                       <td className="px-3 py-3">
                         <Badge
                           variant={
-                            isInactive
+                            isRelieved
+                              ? "outline"
+                              : isInactive
                               ? "neutral"
                               : person.account_status === "active"
                               ? "success"
@@ -363,9 +366,13 @@ export function WorkforceTable({
                               ? "warning"
                               : "info"
                           }
-                          className="text-[11px]"
+                          className={`text-[11px] ${
+                            isRelieved
+                              ? "bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-950/40 dark:text-purple-300 font-semibold"
+                              : ""
+                          }`}
                         >
-                          {person.onboarding_lifecycle_status}
+                          {isRelieved ? "Relieved" : person.onboarding_lifecycle_status}
                         </Badge>
                       </td>
 
@@ -450,6 +457,23 @@ export function WorkforceTable({
                               >
                                 <Send className="size-3.5 mr-2" />
                                 <span>Send Setup Email</span>
+                              </DropdownMenuItem>
+                            )}
+
+                            {canManageWorkforce && !isRelieved && primaryRole !== "super_admin" && (
+                              <DropdownMenuItem asChild>
+                                <Link to={"/employee-relieving" as any} className="flex items-center cursor-pointer">
+                                  <FileCheck2 className="size-3.5 mr-2 text-red-600" />
+                                  <span>Initiate Relieving</span>
+                                </Link>
+                              </DropdownMenuItem>
+                            )}
+                            {isRelieved && (
+                              <DropdownMenuItem asChild>
+                                <Link to={"/employee-relieving" as any} className="flex items-center cursor-pointer">
+                                  <FileCheck2 className="size-3.5 mr-2 text-purple-600" />
+                                  <span>Relieving Letter</span>
+                                </Link>
                               </DropdownMenuItem>
                             )}
 

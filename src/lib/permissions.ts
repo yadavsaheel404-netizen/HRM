@@ -66,6 +66,11 @@ export const PERMISSION_KEYS = [
   "emails:read:all",
   "emails:manage:all",
   "emails:send:all",
+  "relieving:read:all",
+  "relieving:manage:all",
+  "relieving:approve:all",
+  "relieving:send:all",
+  "relieving:read:self",
 ] as const;
 
 export type PermissionKey = (typeof PERMISSION_KEYS)[number];
@@ -364,7 +369,7 @@ export const ACCOUNT_STATUS_LABELS: Record<AccountStatus, string> = {
   active: "Active",
 };
 
-export const EMPLOYMENT_STATUSES = ["active", "inactive", "on_hold", "exited"] as const;
+export const EMPLOYMENT_STATUSES = ["active", "inactive", "on_hold", "exited", "relieved"] as const;
 export type EmploymentStatus = (typeof EMPLOYMENT_STATUSES)[number];
 
 export const DOCUMENT_TYPES = [
@@ -577,12 +582,20 @@ export function normalizeEffectivePermissions(
     next.add("emails:read:all");
     next.add("emails:manage:all");
     next.add("emails:send:all");
+    next.add("relieving:read:all");
+    next.add("relieving:manage:all");
+    next.add("relieving:approve:all");
+    next.add("relieving:send:all");
   }
   if (roles.includes("admin")) {
     next.add("attendance:update:all");
     next.add("recruitment:read:all");
     next.add("interviews:read:all");
     next.add("emails:read:all");
+    next.add("relieving:read:all");
+  }
+  if (roles.some((r) => r === "employee" || r === "lead" || r === "manager" || r === "admin" || r === "hr")) {
+    next.add("relieving:read:self");
   }
   if (roles.includes("manager")) {
     next.add("projects:manage:team");
@@ -646,6 +659,9 @@ export function normalizeEffectivePermissions(
     next.delete("interviews:manage:all");
     next.delete("emails:manage:all");
     next.delete("emails:send:all");
+    next.delete("relieving:manage:all");
+    next.delete("relieving:approve:all");
+    next.delete("relieving:send:all");
   }
 
   // KYC document privacy: raw read/verify restricted to HR (+ Super Admin handled above)

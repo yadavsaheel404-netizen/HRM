@@ -248,8 +248,9 @@ describe("Phase P1 — Role-Relevant Sidebar Navigation & Hub Consolidation", ()
     const groups = buildRoleNavigation(sa);
     const allItems = groups.flatMap((g) => g.items);
 
-    // Consolidated well below the old 16-item flat list
-    expect(allItems.length).toBeLessThanOrEqual(11);
+    // Consolidated well below the old 16-item flat list (includes dedicated /employee-relieving)
+    expect(allItems.length).toBeLessThanOrEqual(12);
+    expect(allItems.some((i) => i.to === "/employee-relieving")).toBe(true);
 
     const invitesItem = allItems.find((i) => i.to === "/invitations")!;
     expect(isNavItemActive("/invitations", invitesItem)).toBe(true);

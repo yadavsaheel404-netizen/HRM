@@ -15,6 +15,7 @@ import { Route as AuthRouteImport } from './routes/auth'
 import { Route as AuthenticatedAutomationRouteImport } from './routes/_authenticated/automation'
 import { Route as AuthenticatedDashboardRouteImport } from './routes/_authenticated/dashboard'
 import { Route as AuthenticatedEmailCenterRouteImport } from './routes/_authenticated/email-center'
+import { Route as AuthenticatedEmployeeRelievingRouteImport } from './routes/_authenticated/employee-relieving'
 import { Route as AuthenticatedImportRouteImport } from './routes/_authenticated/import'
 import { Route as AuthenticatedInterviewsRouteImport } from './routes/_authenticated/interviews'
 import { Route as AuthenticatedInvitationsRouteImport } from './routes/_authenticated/invitations'
@@ -68,6 +69,12 @@ const AuthenticatedEmailCenterRoute =
   AuthenticatedEmailCenterRouteImport.update({
     id: '/email-center',
     path: '/email-center',
+    getParentRoute: () => AuthenticatedRouteRoute,
+  } as any)
+const AuthenticatedEmployeeRelievingRoute =
+  AuthenticatedEmployeeRelievingRouteImport.update({
+    id: '/employee-relieving',
+    path: '/employee-relieving',
     getParentRoute: () => AuthenticatedRouteRoute,
   } as any)
 const AuthenticatedImportRoute = AuthenticatedImportRouteImport.update({
@@ -209,6 +216,7 @@ export interface FileRoutesByFullPath {
   '/automation': typeof AuthenticatedAutomationRoute
   '/dashboard': typeof AuthenticatedDashboardRoute
   '/email-center': typeof AuthenticatedEmailCenterRoute
+  '/employee-relieving': typeof AuthenticatedEmployeeRelievingRoute
   '/import': typeof AuthenticatedImportRoute
   '/interviews': typeof AuthenticatedInterviewsRoute
   '/invitations': typeof AuthenticatedInvitationsRoute
@@ -240,6 +248,7 @@ export interface FileRoutesByTo {
   '/automation': typeof AuthenticatedAutomationRoute
   '/dashboard': typeof AuthenticatedDashboardRoute
   '/email-center': typeof AuthenticatedEmailCenterRoute
+  '/employee-relieving': typeof AuthenticatedEmployeeRelievingRoute
   '/import': typeof AuthenticatedImportRoute
   '/interviews': typeof AuthenticatedInterviewsRoute
   '/invitations': typeof AuthenticatedInvitationsRoute
@@ -273,6 +282,7 @@ export interface FileRoutesById {
   '/_authenticated/automation': typeof AuthenticatedAutomationRoute
   '/_authenticated/dashboard': typeof AuthenticatedDashboardRoute
   '/_authenticated/email-center': typeof AuthenticatedEmailCenterRoute
+  '/_authenticated/employee-relieving': typeof AuthenticatedEmployeeRelievingRoute
   '/_authenticated/import': typeof AuthenticatedImportRoute
   '/_authenticated/interviews': typeof AuthenticatedInterviewsRoute
   '/_authenticated/invitations': typeof AuthenticatedInvitationsRoute
@@ -306,6 +316,7 @@ export interface FileRouteTypes {
     | '/automation'
     | '/dashboard'
     | '/email-center'
+    | '/employee-relieving'
     | '/import'
     | '/interviews'
     | '/invitations'
@@ -337,6 +348,7 @@ export interface FileRouteTypes {
     | '/automation'
     | '/dashboard'
     | '/email-center'
+    | '/employee-relieving'
     | '/import'
     | '/interviews'
     | '/invitations'
@@ -369,6 +381,7 @@ export interface FileRouteTypes {
     | '/_authenticated/automation'
     | '/_authenticated/dashboard'
     | '/_authenticated/email-center'
+    | '/_authenticated/employee-relieving'
     | '/_authenticated/import'
     | '/_authenticated/interviews'
     | '/_authenticated/invitations'
@@ -448,6 +461,13 @@ declare module '@tanstack/react-router' {
       path: '/email-center'
       fullPath: '/email-center'
       preLoaderRoute: typeof AuthenticatedEmailCenterRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/employee-relieving': {
+      id: '/_authenticated/employee-relieving'
+      path: '/employee-relieving'
+      fullPath: '/employee-relieving'
+      preLoaderRoute: typeof AuthenticatedEmployeeRelievingRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
     '/_authenticated/import': {
@@ -625,6 +645,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedAutomationRoute: typeof AuthenticatedAutomationRoute
   AuthenticatedDashboardRoute: typeof AuthenticatedDashboardRoute
   AuthenticatedEmailCenterRoute: typeof AuthenticatedEmailCenterRoute
+  AuthenticatedEmployeeRelievingRoute: typeof AuthenticatedEmployeeRelievingRoute
   AuthenticatedImportRoute: typeof AuthenticatedImportRoute
   AuthenticatedInterviewsRoute: typeof AuthenticatedInterviewsRoute
   AuthenticatedInvitationsRoute: typeof AuthenticatedInvitationsRoute
@@ -650,6 +671,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedAutomationRoute: AuthenticatedAutomationRoute,
   AuthenticatedDashboardRoute: AuthenticatedDashboardRoute,
   AuthenticatedEmailCenterRoute: AuthenticatedEmailCenterRoute,
+  AuthenticatedEmployeeRelievingRoute: AuthenticatedEmployeeRelievingRoute,
   AuthenticatedImportRoute: AuthenticatedImportRoute,
   AuthenticatedInterviewsRoute: AuthenticatedInterviewsRoute,
   AuthenticatedInvitationsRoute: AuthenticatedInvitationsRoute,

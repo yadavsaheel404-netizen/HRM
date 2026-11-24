@@ -22,7 +22,8 @@ export type NavIconKey =
   | "requests"
   | "reports"
   | "org"
-  | "automation";
+  | "automation"
+  | "relieving";
 
 export type RoleNavItem = {
   to: string;
@@ -92,6 +93,7 @@ export function buildRoleNavigation(
     actorCan(fullActor, "rbac:manage:all");
   const canAutomation = actorCan(fullActor, "automation:run:all");
   const canImports = actorCan(fullActor, "import:manage:all");
+  const canRelieving = actorCan(fullActor, "relieving:read:all");
 
   const personalItems: RoleNavItem[] = [
     ...(canMyDay
@@ -349,6 +351,14 @@ export function buildRoleNavigation(
         matchPrefixes: ["/workforce"],
       });
     }
+    if (canRelieving) {
+      hrItems.push({
+        to: "/employee-relieving",
+        label: "Employee Relieving",
+        iconKey: "relieving",
+        matchPrefixes: ["/employee-relieving"],
+      });
+    }
     if (canRequests) {
       hrItems.push({
         to: "/requests",
@@ -467,6 +477,14 @@ export function buildRoleNavigation(
       label: primaryRole === "super_admin" ? "Workforce & Roles" : "Workforce Directory",
       iconKey: "workforce",
       matchPrefixes: ["/workforce"],
+    });
+  }
+  if (canRelieving) {
+    peopleAndGovItems.push({
+      to: "/employee-relieving",
+      label: "Employee Relieving",
+      iconKey: "relieving",
+      matchPrefixes: ["/employee-relieving"],
     });
   }
   if (canInvites) {

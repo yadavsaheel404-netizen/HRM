@@ -11,6 +11,16 @@ export const SUPPORTED_EMAIL_VARIABLES = [
   "interview_mode",
   "office_location",
   "portal_url",
+  "employee_name",
+  "employment_start_date",
+  "employment_end_date",
+  "relieving_date",
+  "issue_date",
+  "legal_employer",
+  "signatory_name",
+  "signatory_title",
+  "company_address",
+  "company_contact",
 ] as const;
 
 export type EmailVariableKey = (typeof SUPPORTED_EMAIL_VARIABLES)[number];
@@ -28,6 +38,16 @@ export const EMAIL_VARIABLE_DESCRIPTIONS: Record<EmailVariableKey, string> = {
   interview_mode: "Online or Offline",
   office_location: "Office location name/address (for offline interviews)",
   portal_url: "The AI School HRM portal URL",
+  employee_name: "Exiting employee's full name",
+  employment_start_date: "Verified date of joining",
+  employment_end_date: "Confirmed last working day",
+  relieving_date: "Official effective relieving date",
+  issue_date: "Date of letter issuance",
+  legal_employer: "Legal employer name (Learning Paths Technologies LLP)",
+  signatory_name: "Authorized signatory name (K. Spandana)",
+  signatory_title: "Authorized signatory title (HR - Director)",
+  company_address: "Company registered / office address",
+  company_contact: "Company official contact phone number",
 };
 
 export const SAMPLE_EMAIL_VARIABLES: Record<EmailVariableKey, string> = {
@@ -43,6 +63,16 @@ export const SAMPLE_EMAIL_VARIABLES: Record<EmailVariableKey, string> = {
   interview_mode: "Online",
   office_location: "The AI School HQ, Bengaluru",
   portal_url: "https://hrm-theta-gilt.vercel.app",
+  employee_name: "B.Yaswanth",
+  employment_start_date: "02 Jul 2026",
+  employment_end_date: "30 Oct 2026",
+  relieving_date: "30 Oct 2026",
+  issue_date: "30 Oct 2026",
+  legal_employer: "Learning Paths Technologies LLP",
+  signatory_name: "K. Spandana",
+  signatory_title: "HR - Director",
+  company_address: "T-hub 2.0, Knowledge City, Hyderabad, Telangana",
+  company_contact: "+91 92468 18843",
 };
 
 export type EmailTemplateDefinition = {
@@ -54,7 +84,8 @@ export type EmailTemplateDefinition = {
     | "decisions"
     | "offers"
     | "onboarding"
-    | "communications";
+    | "communications"
+    | "relieving";
   subjectTemplate: string;
   bodyHtmlTemplate: string;
   bodyTextTemplate: string;
@@ -272,6 +303,30 @@ export const DEFAULT_EMAIL_TEMPLATES: readonly EmailTemplateDefinition[] = [
       "department",
       "portal_url",
       "hr_contact",
+    ],
+  },
+  {
+    slug: "employee_relieving_letter",
+    name: "Relieving / Experience Letter",
+    category: "relieving",
+    subjectTemplate: "Your Experience & Relieving Letter — The AI School",
+    bodyHtmlTemplate:
+      "<p>Dear {{employee_name}},</p><p>Please find attached your official <strong>Experience &amp; Relieving Letter</strong> from <strong>{{legal_employer}}</strong> effective close of business on <strong>{{relieving_date}}</strong>.</p><p>We appreciate your contributions during your tenure as <strong>{{designation}}</strong> and wish you success in your future endeavors.</p><p>For any questions about the letter, please contact our HR team.</p><p>Warm regards,<br/><strong>The AI School HR</strong><br/>{{signatory_name}}<br/>{{signatory_title}}<br/>{{legal_employer}}</p>",
+    bodyTextTemplate:
+      "Dear {{employee_name}},\n\nPlease find attached your official experience and relieving letter from {{legal_employer}} effective close of business on {{relieving_date}}.\n\nWe appreciate your contributions as {{designation}} and wish you success in your future endeavors.\n\nFor any questions about the letter, please contact our HR team.\n\nWarm regards,\nThe AI School HR\n{{signatory_name}}\n{{signatory_title}}\n{{legal_employer}}",
+    variables: [
+      "employee_name",
+      "employee_id",
+      "designation",
+      "employment_start_date",
+      "employment_end_date",
+      "relieving_date",
+      "issue_date",
+      "legal_employer",
+      "signatory_name",
+      "signatory_title",
+      "company_address",
+      "company_contact",
     ],
   },
 ] as const;

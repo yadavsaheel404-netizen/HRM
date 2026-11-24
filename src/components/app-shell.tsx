@@ -10,6 +10,7 @@ import {
   ChevronDown,
   ChevronRight,
   ClipboardCheck,
+  FileCheck,
   FolderKanban,
   LayoutDashboard,
   ListChecks,
@@ -62,6 +63,7 @@ const NAV_ICONS: Record<NavIconKey, LucideIcon> = {
   reports: BarChart3,
   org: Building2,
   automation: Bot,
+  relieving: FileCheck,
 };
 
 export function AppShell({

@@ -52,7 +52,7 @@ export const getEmailCenterData = createServerFn({ method: "GET" })
 
     const providerStatus = inspectEmailProviderConfig();
 
-    const [templatesRes, messagesRes, candidatesRes, { data: departments }] =
+    const [templatesRes, messagesRes, candidatesRes, { data: departments }, employeesRes, { data: superAdminRows }] =
       await Promise.all([
         supabase.from("email_templates").select("*").order("name"),
         supabase
@@ -70,6 +70,17 @@ export const getEmailCenterData = createServerFn({ method: "GET" })
               .limit(300)
           : Promise.resolve({ data: [], error: null }),
         supabase.from("departments").select("id, name"),
+        actor.permissions.includes("relieving:read:all") || actor.permissions.includes("workforce:read:all")
+          ? supabase
+              .from("profiles")
+              .select(
+                "id, employee_code, full_name, work_email, personal_email, designation, department_id, joining_date, employment_status",
+              )
+              .neq("employment_status" as any, "relieved")
+              .order("full_name")
+              .limit(300)
+          : Promise.resolve({ data: [], error: null }),
+        supabase.from("user_roles").select("user_id").eq("role", "super_admin"),
       ]);
 
     const schemaReady =
@@ -131,6 +142,20 @@ export const getEmailCenterData = createServerFn({ method: "GET" })
       joiningDate: c.available_joining_date,
     }));
 
+    const superAdminIds = new Set((superAdminRows ?? []).map((r) => r.user_id));
+    const employees = (employeesRes?.error ? [] : (employeesRes?.data ?? []))
+      .filter((p: any) => !superAdminIds.has(p.id) && p.id !== userId)
+      .map((p: any) => ({
+        id: p.id,
+        employeeCode: p.employee_code ?? "—",
+        fullName: p.full_name,
+        workEmail: p.work_email,
+        designation: p.designation ?? "AI Data Associate Intern",
+        departmentName: p.department_id ? (deptMap.get(p.department_id) ?? null) : null,
+        joiningDate: p.joining_date ?? "2026-07-02",
+        employmentStatus: p.employment_status,
+      }));
+
     const messages = messagesRes.data ?? [];
     const acceptedCount = messages.filter(
       (m) => m.status === "accepted_by_smtp" || m.status === "sent",
@@ -156,6 +181,7 @@ export const getEmailCenterData = createServerFn({ method: "GET" })
       messages,
       stats,
       candidates,
+      employees,
     };
   });
 
@@ -494,6 +520,38 @@ export const sendRecruitmentEmail = createServerFn({ method: "POST" })
       };
     }
 
+    let attachments: any[] | undefined = undefined;
+    if (data.templateSlug === "employee_relieving_letter") {
+      const { generateRelievingLetterPdf } = await import("./relieving/pdf-generator.server");
+      const letterData = {
+        employeeName: String(data.variables.employee_name || data.recipientName || "Valued Team Member"),
+        designation: String(data.variables.designation || "AI Data Associate Intern"),
+        legalEmployer: String(data.variables.legal_employer || "Learning Paths Technologies LLP"),
+        joiningDate: String(data.variables.employment_start_date || data.variables.joining_date || "2026-07-02"),
+        lastWorkingDay: String(data.variables.employment_end_date || new Date().toISOString().slice(0, 10)),
+        relievingEffectiveDate: String(data.variables.relieving_date || new Date().toISOString().slice(0, 10)),
+        letterIssueDate: String(data.variables.issue_date || new Date().toISOString().slice(0, 10)),
+        contributedProjects: String(`${data.variables.designation || "AI Data Associate"} and related projects`),
+        performanceStatement: "satisfactory",
+        signatoryName: String(data.variables.signatory_name || "K. Spandana"),
+        signatoryTitle: String(data.variables.signatory_title || "HR - Director"),
+        signatoryDesignation: "Director",
+        companyContact: String(data.variables.company_contact || "+91 92468 18843"),
+        companyAddress: String(data.variables.company_address || "T-hub 2.0, Knowledge City, Hyderabad, Telangana"),
+        isDraft: false,
+      };
+      const pdfBytes = await generateRelievingLetterPdf(letterData);
+      const pdfBuffer = Buffer.from(pdfBytes);
+      const safeName = letterData.employeeName.replace(/[^a-zA-Z0-9_-]/g, "_");
+      attachments = [
+        {
+          filename: `Experience_Letter_${safeName}.pdf`,
+          content: pdfBuffer,
+          contentType: "application/pdf",
+        },
+      ];
+    }
+
     const transport = createHostingerSmtpTransport();
     const sendResult = await transport.send({
       to: data.recipientEmail,
@@ -502,6 +560,7 @@ export const sendRecruitmentEmail = createServerFn({ method: "POST" })
       text: rendered.bodyText,
       replyTo: data.replyTo ?? undefined,
       idempotencyKey,
+      attachments,
     });
 
     const nowIso = new Date().toISOString();

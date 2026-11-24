@@ -503,6 +503,7 @@ describe("Phase P2 — HR Email Template Center (15 Templates, Variables & XSS S
       "document_correction_request",
       "hr_announcement",
       "work_notice",
+      "employee_relieving_letter",
     ];
 
     expect(DEFAULT_EMAIL_TEMPLATES.map((t) => t.slug)).toEqual(expectedSlugs);

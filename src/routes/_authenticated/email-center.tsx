@@ -4,8 +4,10 @@ import {
   AlertTriangle,
   AlignLeft,
   CheckCircle2,
+  Download,
   Eye,
   FileCode2,
+  FileText,
   Mail,
   Monitor,
   RefreshCw,
@@ -76,6 +78,8 @@ import {
   validateTemplateVariables,
   type EmailVariableKey,
 } from "@/lib/recruitment/email-templates";
+import { previewRelievingLetter } from "@/lib/relieving.functions";
+import { formatLetterDate, type RelievingLetterData } from "@/lib/relieving/types";
 
 export const Route = createFileRoute("/_authenticated/email-center")({
   loader: ({ context }) => context.queryClient.ensureQueryData(actorQueryOptions),
@@ -114,9 +118,30 @@ const TEMPLATE_CATEGORIES: { id: string; label: string; slugs: string[] }[] = [
   {
     id: "communications",
     label: "Communications",
-    slugs: ["hr_announcement", "work_related_notice"],
+    slugs: ["hr_announcement", "work_notice"],
+  },
+  {
+    id: "relieving",
+    label: "Relieving & Experience Letters",
+    slugs: ["employee_relieving_letter"],
   },
 ];
+
+function formatDisplayDate(dateStr?: string | null): string {
+  if (!dateStr) return "";
+  try {
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return dateStr;
+    const day = String(d.getDate()).padStart(2, "0");
+    const months = [
+      "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+    ];
+    return `${day} ${months[d.getMonth()]} ${d.getFullYear()}`;
+  } catch {
+    return dateStr;
+  }
+}
 
 type ComposeMode = "individual" | "bulk" | "test";
 type LogFilter =
@@ -187,6 +212,7 @@ function EmailCenterPage() {
   const [composeMode, setComposeMode] = useState<ComposeMode>("individual");
   const [composeSlug, setComposeSlug] = useState<string>("interview_invitation");
   const [composeCandidateId, setComposeCandidateId] = useState<string>("");
+  const [composeEmployeeId, setComposeEmployeeId] = useState<string>("");
   const [composeRecipientEmail, setComposeRecipientEmail] = useState<string>("");
   const [composeRecipientName, setComposeRecipientName] = useState<string>("");
   const [composeSubjectTpl, setComposeSubjectTpl] = useState<string>("");
@@ -201,6 +227,41 @@ function EmailCenterPage() {
   const [previewMode, setPreviewMode] = useState<PreviewMode>("desktop");
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
   const [bulkConfirmOpen, setBulkConfirmOpen] = useState(false);
+
+  // Main Tabs navigation state
+  const [activeTab, setActiveTab] = useState<string>("templates");
+
+  // PDF Preview modal state
+  const [pdfPreviewOpen, setPdfPreviewOpen] = useState(false);
+  const [pdfBase64, setPdfBase64] = useState<string | null>(null);
+  const [pdfLoading, setPdfLoading] = useState(false);
+
+  // Dedicated Relieving Letter state (Primary View)
+  const [relievingSubTab, setRelievingSubTab] = useState<"official_letter" | "email_message">("official_letter");
+  const [composePreviewSubTab, setComposePreviewSubTab] = useState<"official_letter" | "email_message">("official_letter");
+  const [letterViewMode, setLetterViewMode] = useState<"pdf" | "document">("pdf");
+  const [isDraftMode, setIsDraftMode] = useState(false);
+  const [letterPdfBlobUrl, setLetterPdfBlobUrl] = useState<string | null>(null);
+  const [letterPdfLoading, setLetterPdfLoading] = useState(false);
+  const [selectedEmployeeId, setSelectedEmployeeId] = useState<string>("");
+
+  const [letterData, setLetterData] = useState<RelievingLetterData>({
+    employeeName: "B.Yaswanth",
+    designation: "AI Data Annotation Analyst – Intern",
+    legalEmployer: "Learning Paths Technologies LLP",
+    joiningDate: "2026-07-02",
+    lastWorkingDay: "2026-10-30",
+    relievingEffectiveDate: "2026-10-30",
+    letterIssueDate: "2026-10-30",
+    contributedProjects: "various AI Data Associate Intern and related projects",
+    performanceStatement: "found to be satisfactory",
+    signatoryName: "K. Spandana",
+    signatoryTitle: "HR - Director",
+    signatoryDesignation: "Director",
+    companyContact: "+91 92468 18843",
+    companyAddress: "T-hub 2.0, Knowledge City, Hyderabad, Telangana",
+    isDraft: false,
+  });
 
   // Delivery history & verification state
   const [logFilter, setLogFilter] = useState<LogFilter>("all");
@@ -317,6 +378,223 @@ function EmailCenterPage() {
       joining_date: cand.joiningDate ?? prev.joining_date,
     }));
   }
+
+  function handleSelectComposeEmployee(employeeId: string) {
+    setComposeEmployeeId(employeeId);
+    const emp = (data?.employees ?? []).find((e: any) => e.id === employeeId);
+    if (!emp) return;
+
+    setComposeRecipientEmail(emp.workEmail);
+    setComposeRecipientName(emp.fullName);
+
+    const joiningFormatted = emp.joiningDate ? formatDisplayDate(emp.joiningDate) : "02 Jul 2026";
+    const todayFormatted = formatDisplayDate(new Date().toISOString());
+
+    setComposeVars((prev) => ({
+      ...prev,
+      employee_name: emp.fullName,
+      candidate_name: emp.fullName,
+      employee_id: emp.employeeCode,
+      designation: emp.designation || "AI Data Associate Intern",
+      department: emp.departmentName || "General",
+      employment_start_date: joiningFormatted,
+      employment_end_date: todayFormatted,
+      relieving_date: todayFormatted,
+      issue_date: todayFormatted,
+      legal_employer: "Learning Paths Technologies LLP",
+      signatory_name: "K. Spandana",
+      signatory_title: "HR - Director",
+      company_address: "T-hub 2.0, Knowledge City, Hyderabad, Telangana",
+      company_contact: "+91 92468 18843",
+    }));
+  }
+
+  async function refreshLetterPdf(customData?: RelievingLetterData, draft?: boolean) {
+    try {
+      setLetterPdfLoading(true);
+      const dataToRender = customData || letterData;
+      const isDraft = draft !== undefined ? draft : isDraftMode;
+      const res = await previewRelievingLetter({
+        data: {
+          letterData: {
+            ...dataToRender,
+            isDraft,
+          },
+          isDraft,
+        },
+      });
+
+      const binaryString = atob(res.base64);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      const blob = new Blob([bytes], { type: "application/pdf" });
+      const url = URL.createObjectURL(blob);
+      setLetterPdfBlobUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return url;
+      });
+    } catch (err) {
+      toast.error(describeUnknownError(err));
+    } finally {
+      setLetterPdfLoading(false);
+    }
+  }
+
+  async function handlePreviewPdf(source: "editor" | "compose") {
+    try {
+      setPdfLoading(true);
+      setPdfPreviewOpen(true);
+      setPdfBase64(null);
+
+      const vars = source === "compose" ? composeVars : SAMPLE_EMAIL_VARIABLES;
+      const dataToRender: RelievingLetterData = source === "compose" ? {
+        employeeName: vars.employee_name || composeRecipientName || "B.Yaswanth",
+        designation: vars.designation || "AI Data Annotation Analyst – Intern",
+        legalEmployer: vars.legal_employer || "Learning Paths Technologies LLP",
+        joiningDate: vars.employment_start_date || "2026-07-02",
+        lastWorkingDay: vars.employment_end_date || "2026-10-30",
+        relievingEffectiveDate: vars.relieving_date || "2026-10-30",
+        letterIssueDate: vars.issue_date || "2026-10-30",
+        contributedProjects: "various AI Data Associate Intern and related projects",
+        performanceStatement: "found to be satisfactory",
+        signatoryName: vars.signatory_name || "K. Spandana",
+        signatoryTitle: vars.signatory_title || "HR - Director",
+        signatoryDesignation: "Director",
+        companyContact: vars.company_contact || "+91 92468 18843",
+        companyAddress: vars.company_address || "T-hub 2.0, Knowledge City, Hyderabad, Telangana",
+        isDraft: false,
+      } : letterData;
+
+      const res = await previewRelievingLetter({
+        data: {
+          letterData: dataToRender,
+          isDraft: false,
+        },
+      });
+
+      setPdfBase64(res.base64);
+    } catch (err) {
+      toast.error(describeUnknownError(err));
+      setPdfPreviewOpen(false);
+    } finally {
+      setPdfLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (activeTemplate?.slug === "employee_relieving_letter" && !letterPdfBlobUrl) {
+      void refreshLetterPdf(letterData, isDraftMode);
+    }
+  }, [activeTemplate?.slug]);
+
+  function handleSelectWorkforceEmployee(empId: string) {
+    setSelectedEmployeeId(empId);
+    const emp = (data?.employees ?? []).find((e: any) => e.id === empId);
+    if (!emp) return;
+
+    const joiningFormatted = emp.joiningDate || "2026-07-02";
+    const todayFormatted = "2026-10-30";
+
+    const updated: RelievingLetterData = {
+      ...letterData,
+      employeeName: emp.fullName,
+      designation: emp.designation || "AI Data Annotation Analyst – Intern",
+      joiningDate: joiningFormatted,
+      lastWorkingDay: todayFormatted,
+      relievingEffectiveDate: todayFormatted,
+      letterIssueDate: todayFormatted,
+    };
+    setLetterData(updated);
+    void refreshLetterPdf(updated, isDraftMode);
+
+    // Sync to compose state as well
+    setComposeEmployeeId(emp.id);
+    setComposeRecipientEmail(emp.workEmail);
+    setComposeRecipientName(emp.fullName);
+    setComposeVars((prev) => ({
+      ...prev,
+      employee_name: emp.fullName,
+      candidate_name: emp.fullName,
+      employee_id: emp.employeeCode,
+      designation: emp.designation || "AI Data Annotation Analyst – Intern",
+      employment_start_date: formatLetterDate(joiningFormatted),
+      employment_end_date: formatLetterDate(todayFormatted),
+      relieving_date: formatLetterDate(todayFormatted),
+      issue_date: formatLetterDate(todayFormatted),
+      legal_employer: "Learning Paths Technologies LLP",
+      signatory_name: "K. Spandana",
+      signatory_title: "HR - Director",
+      company_address: "T-hub 2.0, Knowledge City, Hyderabad, Telangana",
+      company_contact: "+91 92468 18843",
+    }));
+  }
+
+  async function handleDownloadLetterDirect(draft: boolean) {
+    try {
+      setLetterPdfLoading(true);
+      const res = await previewRelievingLetter({
+        data: {
+          letterData: {
+            ...letterData,
+            isDraft: draft,
+          },
+          isDraft: draft,
+        },
+      });
+
+      const link = document.createElement("a");
+      link.href = `data:application/pdf;base64,${res.base64}`;
+      const safeName = (letterData.employeeName || "Official").replace(/[^a-zA-Z0-9_-]/g, "_");
+      link.download = draft
+        ? `Draft_Experience_Letter_${safeName}.pdf`
+        : `Experience_Letter_${safeName}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      toast.success(
+        `Downloaded ${draft ? "draft (watermarked)" : "official (certified)"} letter PDF for ${letterData.employeeName}.`
+      );
+    } catch (err) {
+      toast.error(describeUnknownError(err));
+    } finally {
+      setLetterPdfLoading(false);
+    }
+  }
+
+  const activeComposeTemplate = templates.find((t) => t.slug === composeSlug);
+  const visibleVars: EmailVariableKey[] = useMemo(() => {
+    if (composeSlug === "employee_relieving_letter") {
+      return [
+        "employee_name",
+        "employee_id",
+        "designation",
+        "employment_start_date",
+        "employment_end_date",
+        "relieving_date",
+        "issue_date",
+        "legal_employer",
+        "signatory_name",
+        "signatory_title",
+        "company_address",
+        "company_contact",
+      ];
+    }
+    return activeComposeTemplate?.variables?.length
+      ? (activeComposeTemplate.variables as EmailVariableKey[])
+      : [
+        "candidate_name",
+        "designation",
+        "department",
+        "interview_date",
+        "interview_time",
+        "meeting_link",
+        "joining_date",
+        "employee_id",
+        "hr_contact",
+      ];
+  }, [composeSlug, activeComposeTemplate]);
 
   function toggleBulkCandidate(id: string) {
     setBulkCandidateIds((prev) =>
@@ -610,7 +888,7 @@ function EmailCenterPage() {
         </div>
       ) : null}
 
-      <Tabs defaultValue="templates" className="space-y-5">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-5">
         <TabsList>
           <TabsTrigger value="templates">
             <FileCode2 className="mr-1.5 size-3.5" />
@@ -626,7 +904,7 @@ function EmailCenterPage() {
           </TabsTrigger>
         </TabsList>
 
-        {/* TAB 1: 15 EDITABLE TEMPLATES GROUPED BY CATEGORY */}
+        {/* TAB 1: 16 EDITABLE TEMPLATES GROUPED BY CATEGORY */}
         <TabsContent value="templates" className="space-y-4">
           <div className="grid gap-5 lg:grid-cols-12">
             {/* Left Template Selector Grouped by Category */}
@@ -634,7 +912,7 @@ function EmailCenterPage() {
               <CardHeader className="pb-3">
                 <CardTitle className="text-base">Standard HR Templates</CardTitle>
                 <CardDescription>
-                  15 standardized templates organized by lifecycle stage.
+                  16 standardized templates organized by lifecycle stage.
                 </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -654,11 +932,10 @@ function EmailCenterPage() {
                               key={tpl.slug}
                               type="button"
                               onClick={() => setSelectedSlug(tpl.slug)}
-                              className={`flex w-full items-center justify-between rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors ${
-                                selected
-                                  ? "border-primary bg-primary/10 font-semibold text-primary"
-                                  : "border-border/60 bg-card text-muted-foreground hover:bg-muted/40 hover:text-foreground"
-                              }`}
+                              className={`flex w-full items-center justify-between rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors ${selected
+                                ? "border-primary bg-primary/10 font-semibold text-primary"
+                                : "border-border/60 bg-card text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+                                }`}
                             >
                               <span className="truncate pr-1.5">{tpl.name}</span>
                               <code className="shrink-0 font-mono text-[10px] text-muted-foreground">
@@ -676,212 +953,770 @@ function EmailCenterPage() {
 
             {/* Right Editor + Live Branded Preview */}
             <div className="space-y-4 lg:col-span-8">
-              <Card>
-                <CardHeader className="pb-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                      <CardTitle className="text-base">
-                        {activeTemplate?.name ?? "Template Editor"}
-                      </CardTitle>
-                      <CardDescription>
-                        Slug: <code className="font-mono">{activeTemplate?.slug}</code>
-                      </CardDescription>
-                    </div>
-                    {canManageTemplates ? (
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          onClick={() => setResetConfirmOpen(true)}
-                          disabled={savingTemplate || !data?.schemaReady}
-                        >
-                          <RotateCcw className="mr-1.5 size-3.5" />
-                          Reset Default
-                        </Button>
-                        <Button
-                          size="sm"
-                          onClick={handleSaveTemplate}
-                          disabled={
-                            savingTemplate ||
-                            !editorValidation.valid ||
-                            !data?.schemaReady
-                          }
-                        >
-                          <Save className="mr-1.5 size-3.5" />
-                          {savingTemplate ? "Saving..." : "Save Template"}
-                        </Button>
-                      </div>
-                    ) : null}
-                  </div>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  {/* Clean Dynamic Variables Toolbar */}
-                  <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border/70 bg-muted/20 px-3 py-2">
-                    <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                      <Sparkles className="size-3.5 text-primary" />
-                      <span className="font-medium text-foreground">Dynamic Placeholders</span>
-                    </div>
-                    {canManageTemplates && (
-                      <select
-                        aria-label="Insert dynamic variable"
-                        value=""
-                        onChange={(e) => {
-                          if (e.target.value) {
-                            insertVariableIntoHtml(e.target.value as EmailVariableKey);
-                          }
-                        }}
-                        className="h-8 rounded-md border border-input bg-background px-2.5 font-medium text-xs text-foreground"
+              {activeTemplate?.slug === "employee_relieving_letter" ? (
+                /* OFFICIAL LETTER (PDF) as PRIMARY + EMAIL MESSAGE as SECONDARY */
+                <Tabs
+                  value={relievingSubTab}
+                  onValueChange={(v) => setRelievingSubTab(v as any)}
+                  className="space-y-4"
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-card p-2.5 shadow-xs">
+                    <TabsList className="bg-muted">
+                      <TabsTrigger
+                        value="official_letter"
+                        className="gap-2 text-xs font-semibold data-[state=active]:bg-background data-[state=active]:text-primary"
                       >
-                        <option value="">+ Insert Variable into HTML...</option>
-                        {SUPPORTED_EMAIL_VARIABLES.map((v) => (
-                          <option key={v} value={v}>
-                            {`{{${v}}}`} — {EMAIL_VARIABLE_DESCRIPTIONS[v]}
-                          </option>
-                        ))}
-                      </select>
-                    )}
-                  </div>
-
-                  {!editorValidation.valid ? (
-                    <div className="rounded-md border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-700 dark:text-rose-300">
-                      Unsupported placeholder(s):{" "}
-                      <strong>
-                        {editorValidation.unknownVariables
-                          .map((v) => `{{${v}}}`)
-                          .join(", ")}
-                      </strong>
-                      . Use only supported placeholders.
-                    </div>
-                  ) : null}
-
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <div className="space-y-1.5">
-                      <Label htmlFor="tpl-name">Template Display Name</Label>
-                      <Input
-                        id="tpl-name"
-                        value={tplName}
-                        disabled={!canManageTemplates}
-                        onChange={(e) => setTplName(e.target.value)}
-                      />
-                    </div>
-                    <div className="space-y-1.5">
-                      <Label htmlFor="tpl-subject">Subject Line Template</Label>
-                      <Input
-                        id="tpl-subject"
-                        value={tplSubject}
-                        disabled={!canManageTemplates}
-                        onChange={(e) => setTplSubject(e.target.value)}
-                      />
-                    </div>
-                  </div>
-
-                  <Tabs
-                    value={editorTab}
-                    onValueChange={(v) => setEditorTab(v as any)}
-                    className="w-full"
-                  >
-                    <TabsList className="grid w-full grid-cols-2">
-                      <TabsTrigger value="visual">HTML Body Template</TabsTrigger>
-                      <TabsTrigger value="code">Plain-Text Fallback</TabsTrigger>
+                        <FileText className="size-3.5 text-primary" />
+                        OFFICIAL LETTER (PDF)
+                      </TabsTrigger>
+                      <TabsTrigger
+                        value="email_message"
+                        className="gap-2 text-xs font-semibold data-[state=active]:bg-background"
+                      >
+                        <Mail className="size-3.5" />
+                        EMAIL MESSAGE (COVER)
+                      </TabsTrigger>
                     </TabsList>
-
-                    <TabsContent value="visual" className="space-y-2 pt-2">
-                      <div className="space-y-1.5">
-                        <Label htmlFor="tpl-html" className="text-xs">
-                          HTML Body (Formatted layout)
-                        </Label>
-                        <Textarea
-                          id="tpl-html"
-                          rows={6}
-                          value={tplBodyHtml}
-                          disabled={!canManageTemplates}
-                          onChange={(e) => setTplBodyHtml(e.target.value)}
-                          className="font-mono text-xs"
-                        />
-                      </div>
-                    </TabsContent>
-
-                    <TabsContent value="code" className="space-y-2 pt-2">
-                      <div className="space-y-1.5">
-                        <Label htmlFor="tpl-text" className="text-xs">
-                          Plain-Text Fallback Template (Used by non-HTML email clients)
-                        </Label>
-                        <Textarea
-                          id="tpl-text"
-                          rows={6}
-                          value={tplBodyText}
-                          disabled={!canManageTemplates}
-                          onChange={(e) => setTplBodyText(e.target.value)}
-                          className="font-mono text-xs"
-                        />
-                      </div>
-                    </TabsContent>
-                  </Tabs>
-                </CardContent>
-              </Card>
-
-              {/* Live Branded HTML Preview */}
-              <Card>
-                <CardHeader className="pb-2">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <CardTitle className="flex items-center gap-2 text-base">
-                      <Eye className="size-4 text-muted-foreground" />
-                      Live Branded Preview (Sample Candidate Context)
-                    </CardTitle>
-                    <div className="flex flex-wrap gap-1" role="group" aria-label="Email preview mode">
-                      <Button
-                        type="button"
-                        size="sm"
-                        aria-pressed={previewMode === "desktop"}
-                        variant={previewMode === "desktop" ? "default" : "outline"}
-                        onClick={() => setPreviewMode("desktop")}
-                      >
-                        <Monitor className="mr-1 size-3.5" />
-                        Desktop HTML
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        aria-pressed={previewMode === "mobile"}
-                        variant={previewMode === "mobile" ? "default" : "outline"}
-                        onClick={() => setPreviewMode("mobile")}
-                      >
-                        <Smartphone className="mr-1 size-3.5" />
-                        Mobile 375px
-                      </Button>
-                      <Button
-                        type="button"
-                        size="sm"
-                        aria-pressed={previewMode === "text"}
-                        variant={previewMode === "text" ? "default" : "outline"}
-                        onClick={() => setPreviewMode("text")}
-                      >
-                        <AlignLeft className="mr-1 size-3.5" />
-                        Plain Text
-                      </Button>
+                    <div className="flex items-center gap-2">
+                      <Badge variant="outline" className="border-primary/40 bg-primary/5 text-primary text-[11px] font-medium">
+                        Authoritative Template: Macharla Chantii.docx
+                      </Badge>
                     </div>
                   </div>
-                  <CardDescription>
-                    Rendered Subject: <strong>{editorPreview.subject}</strong>
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  {previewMode === "text" ? (
-                    <pre className="h-80 overflow-y-auto whitespace-pre-wrap rounded-md border border-border bg-muted/30 p-4 font-mono text-xs text-foreground">
-                      {editorPreview.bodyText}
-                    </pre>
-                  ) : (
-                    <div className={previewMode === "mobile" ? "mx-auto max-w-[375px]" : ""}>
-                      <iframe
-                        title="Branded HR Email Preview"
-                        sandbox="allow-same-origin"
-                        srcDoc={editorPreview.bodyHtml}
-                        className="h-80 w-full rounded-md border border-border bg-zinc-100"
-                      />
+
+                  {/* SUB-TAB 1: OFFICIAL LETTER (PDF) - PRIMARY VIEW */}
+                  <TabsContent value="official_letter" className="space-y-4 m-0">
+                    {/* Controls Card */}
+                    <Card className="border-border">
+                      <CardHeader className="pb-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <CardTitle className="text-base flex items-center gap-2">
+                              <FileText className="size-4 text-primary" />
+                              Official Experience &amp; Relieving Letter Generator
+                            </CardTitle>
+                            <CardDescription className="text-xs">
+                              Populate verified employee tenure details to generate the authoritative single-page A4 document.
+                            </CardDescription>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => void handleDownloadLetterDirect(true)}
+                              disabled={letterPdfLoading}
+                            >
+                              <Download className="mr-1.5 size-3.5 text-amber-600" />
+                              Download Draft
+                            </Button>
+                            <Button
+                              size="sm"
+                              onClick={() => void handleDownloadLetterDirect(false)}
+                              disabled={letterPdfLoading}
+                            >
+                              <Download className="mr-1.5 size-3.5" />
+                              Download Official PDF
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              onClick={() => {
+                                setComposeSlug("employee_relieving_letter");
+                                setActiveTab("compose");
+                              }}
+                            >
+                              <Send className="mr-1.5 size-3.5" />
+                              Dispatch via Email
+                            </Button>
+                          </div>
+                        </div>
+                      </CardHeader>
+
+                      <CardContent className="space-y-4">
+                        {/* Employee Selector */}
+                        <div className="rounded-lg border border-primary/30 bg-primary/5 p-3.5 space-y-1.5">
+                          <Label htmlFor="select-letter-emp" className="text-xs font-semibold text-primary">
+                            Select Workforce Employee (Auto-Fill)
+                          </Label>
+                          <select
+                            id="select-letter-emp"
+                            value={selectedEmployeeId}
+                            onChange={(e) => handleSelectWorkforceEmployee(e.target.value)}
+                            className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-xs font-medium text-foreground"
+                          >
+                            <option value="">Choose employee to verify &amp; auto-fill dates...</option>
+                            {(data?.employees ?? []).map((emp: any) => (
+                              <option key={emp.id} value={emp.id}>
+                                {emp.fullName} ({emp.employeeCode}) — {emp.designation} — {emp.workEmail}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        {/* Editable Form Inputs Grid */}
+                        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 text-xs">
+                          <div className="space-y-1">
+                            <Label htmlFor="let-emp-name" className="text-[11px] font-medium">Employee Full Name</Label>
+                            <Input
+                              id="let-emp-name"
+                              value={letterData.employeeName}
+                              onChange={(e) => setLetterData((prev) => ({ ...prev, employeeName: e.target.value }))}
+                              className="h-8 text-xs font-medium"
+                            />
+                          </div>
+
+                          <div className="space-y-1">
+                            <Label htmlFor="let-desig" className="text-[11px] font-medium">Designation</Label>
+                            <Input
+                              id="let-desig"
+                              value={letterData.designation}
+                              onChange={(e) => setLetterData((prev) => ({ ...prev, designation: e.target.value }))}
+                              className="h-8 text-xs"
+                            />
+                          </div>
+
+                          <div className="space-y-1">
+                            <Label htmlFor="let-legal-emp" className="text-[11px] font-medium">Legal Employer</Label>
+                            <Input
+                              id="let-legal-emp"
+                              value={letterData.legalEmployer}
+                              onChange={(e) => setLetterData((prev) => ({ ...prev, legalEmployer: e.target.value }))}
+                              className="h-8 text-xs"
+                            />
+                          </div>
+
+                          <div className="space-y-1">
+                            <Label htmlFor="let-join-date" className="text-[11px] font-medium">Joining Date</Label>
+                            <Input
+                              id="let-join-date"
+                              value={letterData.joiningDate}
+                              onChange={(e) => setLetterData((prev) => ({ ...prev, joiningDate: e.target.value }))}
+                              className="h-8 text-xs font-mono"
+                              placeholder="YYYY-MM-DD or 2 Jul 2026"
+                            />
+                          </div>
+
+                          <div className="space-y-1">
+                            <Label htmlFor="let-last-day" className="text-[11px] font-medium">Last Working Day</Label>
+                            <Input
+                              id="let-last-day"
+                              value={letterData.lastWorkingDay}
+                              onChange={(e) => setLetterData((prev) => ({ ...prev, lastWorkingDay: e.target.value }))}
+                              className="h-8 text-xs font-mono"
+                              placeholder="YYYY-MM-DD or 30 Oct 2026"
+                            />
+                          </div>
+
+                          <div className="space-y-1">
+                            <Label htmlFor="let-rel-date" className="text-[11px] font-medium">Relieving Effective Date</Label>
+                            <Input
+                              id="let-rel-date"
+                              value={letterData.relievingEffectiveDate}
+                              onChange={(e) => setLetterData((prev) => ({ ...prev, relievingEffectiveDate: e.target.value }))}
+                              className="h-8 text-xs font-mono"
+                              placeholder="YYYY-MM-DD or 30 Oct 2026"
+                            />
+                          </div>
+
+                          <div className="space-y-1">
+                            <Label htmlFor="let-issue-date" className="text-[11px] font-medium">Letter Issue Date</Label>
+                            <Input
+                              id="let-issue-date"
+                              value={letterData.letterIssueDate}
+                              onChange={(e) => setLetterData((prev) => ({ ...prev, letterIssueDate: e.target.value }))}
+                              className="h-8 text-xs font-mono"
+                              placeholder="YYYY-MM-DD or 30 Oct 2026"
+                            />
+                          </div>
+
+                          <div className="space-y-1">
+                            <Label htmlFor="let-sig-name" className="text-[11px] font-medium">Approved Signatory Name</Label>
+                            <Input
+                              id="let-sig-name"
+                              value={letterData.signatoryName}
+                              onChange={(e) => setLetterData((prev) => ({ ...prev, signatoryName: e.target.value }))}
+                              className="h-8 text-xs"
+                            />
+                          </div>
+
+                          <div className="space-y-1">
+                            <Label htmlFor="let-sig-title" className="text-[11px] font-medium">Approved Signatory Title</Label>
+                            <Input
+                              id="let-sig-title"
+                              value={letterData.signatoryTitle}
+                              onChange={(e) => setLetterData((prev) => ({ ...prev, signatoryTitle: e.target.value }))}
+                              className="h-8 text-xs"
+                            />
+                          </div>
+                        </div>
+
+                        {/* Bottom toolbar */}
+                        <div className="flex flex-wrap items-center justify-between gap-3 pt-2 border-t border-border">
+                          <label className="flex items-center gap-2 cursor-pointer text-xs">
+                            <Checkbox
+                              checked={isDraftMode}
+                              onCheckedChange={(checked) => {
+                                const val = Boolean(checked);
+                                setIsDraftMode(val);
+                                void refreshLetterPdf(letterData, val);
+                              }}
+                            />
+                            <span className="font-medium text-muted-foreground">
+                              Include "DRAFT — FOR REVIEW ONLY" watermark
+                            </span>
+                          </label>
+
+                          <div className="flex items-center gap-2">
+                            <div className="flex rounded-md border border-input p-0.5 bg-muted/40">
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant={letterViewMode === "pdf" ? "default" : "ghost"}
+                                className="h-7 text-xs px-2.5"
+                                onClick={() => setLetterViewMode("pdf")}
+                              >
+                                PDF Renderer
+                              </Button>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant={letterViewMode === "document" ? "default" : "ghost"}
+                                className="h-7 text-xs px-2.5"
+                                onClick={() => setLetterViewMode("document")}
+                              >
+                                Document View
+                              </Button>
+                            </div>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              onClick={() => void refreshLetterPdf(letterData, isDraftMode)}
+                              disabled={letterPdfLoading}
+                            >
+                              <RefreshCw className={`mr-1.5 size-3.5 ${letterPdfLoading ? "animate-spin" : ""}`} />
+                              Update Preview
+                            </Button>
+                          </div>
+                        </div>
+                      </CardContent>
+                    </Card>
+
+                    {/* Live A4 Document Preview Card */}
+                    <Card className="border-border">
+                      <CardHeader className="pb-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <CardTitle className="text-base flex items-center gap-2">
+                              <Eye className="size-4 text-muted-foreground" />
+                              Primary A4 Document Preview
+                            </CardTitle>
+                            <CardDescription className="text-xs">
+                              Exact reproduction of <strong>Macharla Chantii.docx</strong> with official branding, geometry, and authorized stamp.
+                            </CardDescription>
+                          </div>
+                          <Badge variant="outline" className="font-mono text-[10px]">
+                            A4 (595 × 842 pt)
+                          </Badge>
+                        </div>
+                      </CardHeader>
+                      <CardContent>
+                        {letterViewMode === "pdf" ? (
+                          <div className="w-full flex flex-col items-center justify-center bg-zinc-200/50 dark:bg-zinc-900/60 p-3 sm:p-5 rounded-lg border border-border">
+                            {letterPdfLoading ? (
+                              <div className="h-[750px] w-full flex flex-col items-center justify-center gap-3 text-muted-foreground">
+                                <RefreshCw className="size-8 animate-spin text-primary" />
+                                <p className="text-sm font-medium">Generating official letter PDF...</p>
+                              </div>
+                            ) : letterPdfBlobUrl ? (
+                              <iframe
+                                key={letterPdfBlobUrl}
+                                src={`${letterPdfBlobUrl}#toolbar=0&navpanes=0`}
+                                title="Official Experience & Relieving Letter A4"
+                                className="w-full h-[760px] sm:h-[820px] rounded border border-zinc-300 shadow-lg bg-white"
+                              />
+                            ) : (
+                              <div className="h-[400px] flex items-center justify-center text-muted-foreground">
+                                No PDF preview available. Click "Update Preview".
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="w-full flex justify-center bg-zinc-200/50 dark:bg-zinc-900/60 p-4 sm:p-6 rounded-lg border border-border overflow-x-auto">
+                            <div className="w-full max-w-[620px] bg-white text-zinc-900 shadow-xl rounded-sm border border-zinc-200 overflow-hidden relative font-sans text-xs select-text">
+                              {isDraftMode && (
+                                <div className="pointer-events-none absolute inset-0 flex items-center justify-center z-10">
+                                  <span className="text-rose-500/25 text-5xl font-black rotate-[-35deg] tracking-widest select-none">
+                                    DRAFT — FOR REVIEW ONLY
+                                  </span>
+                                </div>
+                              )}
+                              {/* Top Header Banner */}
+                              <img
+                                src="/branding/relieving/header-banner.png"
+                                alt="The AI School & Learning Paths Technologies LLP Header"
+                                className="w-full block"
+                              />
+
+                              {/* Body Content matching Macharla Chantii.docx */}
+                              <div className="px-8 py-6 space-y-3.5 leading-relaxed text-zinc-800">
+                                <p className="font-bold text-zinc-900">Private &amp; Confidential</p>
+                                <p className="font-bold text-zinc-900">Date: {formatLetterDate(letterData.letterIssueDate)}</p>
+                                <p className="font-bold text-zinc-900 underline">Subject:  Experience Letter.</p>
+                                <p className="font-bold text-zinc-900 pt-1">Dear {letterData.employeeName},</p>
+
+                                <p className="pt-1">
+                                  This is to certify that you were associated with{" "}
+                                  <strong className="text-zinc-900">{letterData.legalEmployer}</strong> as an{" "}
+                                  <strong className="text-zinc-900">{letterData.designation}</strong> from{" "}
+                                  <strong className="text-zinc-900">
+                                    {formatLetterDate(letterData.joiningDate)} to {formatLetterDate(letterData.lastWorkingDay)}
+                                  </strong>
+                                </p>
+
+                                <p>
+                                  During your tenure, you contributed to various {letterData.contributedProjects}. Your conduct
+                                  and performance during this period were found to be {letterData.performanceStatement}.
+                                </p>
+
+                                <p>
+                                  As you have completed your tenure with us and duly handed over all assigned responsibilities,
+                                  we hereby relieve you from your duties effective close of business on{" "}
+                                  <strong className="text-zinc-900">{formatLetterDate(letterData.relievingEffectiveDate)}</strong>
+                                </p>
+
+                                <p>
+                                  We wish you continued success in your future academic and professional endeavors.
+                                </p>
+
+                                {/* Dedicated Signatory Block matching PDF coordinates & Word layout */}
+                                <div className="pt-6 space-y-1">
+                                  <p className="text-zinc-800">Yours truly,</p>
+                                  <p className="font-bold text-zinc-900">{letterData.legalEmployer}</p>
+                                </div>
+
+                                {/* Dedicated Signature & Stamp Container with fixed margin, min-height, and no absolute overlap */}
+                                <div className="my-3 min-h-[96px] flex items-center">
+                                  <div className="w-36 h-24 border border-dashed border-blue-400/60 rounded-md bg-blue-50/50 flex flex-col items-center justify-center text-[10px] text-blue-700 font-mono p-2 text-center shadow-xs">
+                                    <CheckCircle2 className="size-4 text-blue-600 mb-1" />
+                                    <span className="font-semibold text-blue-900">Official Seal &amp; Signature</span>
+                                    <span className="text-[9px] text-blue-600">Learning Paths Technologies LLP</span>
+                                  </div>
+                                </div>
+
+                                <div className="space-y-0.5">
+                                  <p className="font-bold text-zinc-900">{letterData.signatoryName} HR -</p>
+                                  <p className="text-zinc-700">{letterData.signatoryDesignation || letterData.signatoryTitle}</p>
+                                </div>
+                              </div>
+
+                              {/* Bottom Footer Banner */}
+                              <img
+                                src="/branding/relieving/footer-banner.png"
+                                alt="The AI School Contact & Address Footer"
+                                className="w-full block"
+                              />
+                            </div>
+                          </div>
+                        )}
+                      </CardContent>
+                    </Card>
+                  </TabsContent>
+
+                  {/* SUB-TAB 2: EMAIL MESSAGE (COVER) */}
+                  <TabsContent value="email_message" className="space-y-4 m-0">
+                    <div className="rounded-lg border border-blue-500/30 bg-blue-500/5 p-3 text-xs text-blue-800 dark:text-blue-200">
+                      <p className="font-semibold text-blue-900 dark:text-blue-100 flex items-center gap-1.5">
+                        <Mail className="size-3.5 text-blue-600" />
+                        Accompanying Cover Email Template
+                      </p>
+                      <p className="mt-0.5 text-blue-700 dark:text-blue-300">
+                        This email message is sent via Hostinger SMTP (<code>hr@theaischool.co</code>) to deliver the official A4
+                        Experience &amp; Relieving Letter PDF attachment to the employee.
+                      </p>
                     </div>
-                  )}
-                </CardContent>
-              </Card>
+
+                    <Card>
+                      <CardHeader className="pb-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <CardTitle className="text-base">Cover Email Template</CardTitle>
+                            <CardDescription>
+                              Slug: <code className="font-mono">{activeTemplate?.slug}</code>
+                            </CardDescription>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-2">
+                            {canManageTemplates ? (
+                              <>
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  onClick={() => setResetConfirmOpen(true)}
+                                  disabled={savingTemplate || !data?.schemaReady}
+                                >
+                                  <RotateCcw className="mr-1.5 size-3.5" />
+                                  Reset Default
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  onClick={handleSaveTemplate}
+                                  disabled={
+                                    savingTemplate ||
+                                    !editorValidation.valid ||
+                                    !data?.schemaReady
+                                  }
+                                >
+                                  <Save className="mr-1.5 size-3.5" />
+                                  {savingTemplate ? "Saving..." : "Save Template"}
+                                </Button>
+                              </>
+                            ) : null}
+                          </div>
+                        </div>
+                      </CardHeader>
+                      <CardContent className="space-y-4">
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          <div className="space-y-1.5">
+                            <Label htmlFor="rel-tpl-name">Email Display Name</Label>
+                            <Input
+                              id="rel-tpl-name"
+                              value={tplName}
+                              disabled={!canManageTemplates}
+                              onChange={(e) => setTplName(e.target.value)}
+                            />
+                          </div>
+                          <div className="space-y-1.5">
+                            <Label htmlFor="rel-tpl-subject">Email Subject Line Template</Label>
+                            <Input
+                              id="rel-tpl-subject"
+                              value={tplSubject}
+                              disabled={!canManageTemplates}
+                              onChange={(e) => setTplSubject(e.target.value)}
+                            />
+                          </div>
+                        </div>
+
+                        <Tabs
+                          value={editorTab}
+                          onValueChange={(v) => setEditorTab(v as any)}
+                          className="w-full"
+                        >
+                          <TabsList className="grid w-full grid-cols-2">
+                            <TabsTrigger value="visual">HTML Body Template</TabsTrigger>
+                            <TabsTrigger value="code">Plain-Text Fallback</TabsTrigger>
+                          </TabsList>
+
+                          <TabsContent value="visual" className="space-y-2 pt-2">
+                            <div className="space-y-1.5">
+                              <Label htmlFor="rel-tpl-html" className="text-xs">
+                                HTML Body (Formatted message that accompanies the PDF)
+                              </Label>
+                              <Textarea
+                                id="rel-tpl-html"
+                                rows={6}
+                                value={tplBodyHtml}
+                                disabled={!canManageTemplates}
+                                onChange={(e) => setTplBodyHtml(e.target.value)}
+                                className="font-mono text-xs"
+                              />
+                            </div>
+                          </TabsContent>
+
+                          <TabsContent value="code" className="space-y-2 pt-2">
+                            <div className="space-y-1.5">
+                              <Label htmlFor="rel-tpl-text" className="text-xs">
+                                Plain-Text Fallback Template
+                              </Label>
+                              <Textarea
+                                id="rel-tpl-text"
+                                rows={6}
+                                value={tplBodyText}
+                                disabled={!canManageTemplates}
+                                onChange={(e) => setTplBodyText(e.target.value)}
+                                className="font-mono text-xs"
+                              />
+                            </div>
+                          </TabsContent>
+                        </Tabs>
+                      </CardContent>
+                    </Card>
+
+                    {/* Live Branded HTML Email Preview */}
+                    <Card>
+                      <CardHeader className="pb-2">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <CardTitle className="flex items-center gap-2 text-base">
+                            <Eye className="size-4 text-muted-foreground" />
+                            Live Branded Email Preview
+                          </CardTitle>
+                          <div className="flex flex-wrap gap-1" role="group" aria-label="Email preview mode">
+                            <Button
+                              type="button"
+                              size="sm"
+                              aria-pressed={previewMode === "desktop"}
+                              variant={previewMode === "desktop" ? "default" : "outline"}
+                              onClick={() => setPreviewMode("desktop")}
+                            >
+                              <Monitor className="mr-1 size-3.5" />
+                              Desktop
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              aria-pressed={previewMode === "mobile"}
+                              variant={previewMode === "mobile" ? "default" : "outline"}
+                              onClick={() => setPreviewMode("mobile")}
+                            >
+                              <Smartphone className="mr-1 size-3.5" />
+                              Mobile
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              aria-pressed={previewMode === "text"}
+                              variant={previewMode === "text" ? "default" : "outline"}
+                              onClick={() => setPreviewMode("text")}
+                            >
+                              <AlignLeft className="mr-1 size-3.5" />
+                              Text
+                            </Button>
+                          </div>
+                        </div>
+                        <CardDescription>
+                          Subject: <strong>{editorPreview.subject}</strong>
+                        </CardDescription>
+                      </CardHeader>
+                      <CardContent>
+                        {previewMode === "text" ? (
+                          <pre className="h-64 overflow-y-auto whitespace-pre-wrap rounded-md border border-border bg-muted/30 p-4 font-mono text-xs text-foreground">
+                            {editorPreview.bodyText}
+                          </pre>
+                        ) : (
+                          <div className={previewMode === "mobile" ? "mx-auto max-w-[375px]" : ""}>
+                            <iframe
+                              title="Branded HR Email Preview"
+                              sandbox="allow-same-origin"
+                              srcDoc={editorPreview.bodyHtml}
+                              className="h-64 w-full rounded-md border border-border bg-zinc-100"
+                            />
+                          </div>
+                        )}
+                      </CardContent>
+                    </Card>
+                  </TabsContent>
+                </Tabs>
+              ) : (
+                /* Standard Template Editor for all other 15 templates */
+                <>
+                  <Card>
+                    <CardHeader className="pb-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <CardTitle className="text-base">
+                            {activeTemplate?.name ?? "Template Editor"}
+                          </CardTitle>
+                          <CardDescription>
+                            Slug: <code className="font-mono">{activeTemplate?.slug}</code>
+                          </CardDescription>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          {canManageTemplates ? (
+                            <>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => setResetConfirmOpen(true)}
+                                disabled={savingTemplate || !data?.schemaReady}
+                              >
+                                <RotateCcw className="mr-1.5 size-3.5" />
+                                Reset Default
+                              </Button>
+                              <Button
+                                size="sm"
+                                onClick={handleSaveTemplate}
+                                disabled={
+                                  savingTemplate ||
+                                  !editorValidation.valid ||
+                                  !data?.schemaReady
+                                }
+                              >
+                                <Save className="mr-1.5 size-3.5" />
+                                {savingTemplate ? "Saving..." : "Save Template"}
+                              </Button>
+                            </>
+                          ) : null}
+                        </div>
+                      </div>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                      {/* Clean Dynamic Variables Toolbar */}
+                      <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border/70 bg-muted/20 px-3 py-2">
+                        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                          <Sparkles className="size-3.5 text-primary" />
+                          <span className="font-medium text-foreground">Dynamic Placeholders</span>
+                        </div>
+                        {canManageTemplates && (
+                          <select
+                            aria-label="Insert dynamic variable"
+                            value=""
+                            onChange={(e) => {
+                              if (e.target.value) {
+                                insertVariableIntoHtml(e.target.value as EmailVariableKey);
+                              }
+                            }}
+                            className="h-8 rounded-md border border-input bg-background px-2.5 font-medium text-xs text-foreground"
+                          >
+                            <option value="">+ Insert Variable into HTML...</option>
+                            {SUPPORTED_EMAIL_VARIABLES.map((v) => (
+                              <option key={v} value={v}>
+                                {`{{${v}}}`} — {EMAIL_VARIABLE_DESCRIPTIONS[v]}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                      </div>
+
+                      {!editorValidation.valid ? (
+                        <div className="rounded-md border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs text-rose-700 dark:text-rose-300">
+                          Unsupported placeholder(s):{" "}
+                          <strong>
+                            {editorValidation.unknownVariables
+                              .map((v) => `{{${v}}}`)
+                              .join(", ")}
+                          </strong>
+                          . Use only supported placeholders.
+                        </div>
+                      ) : null}
+
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <div className="space-y-1.5">
+                          <Label htmlFor="tpl-name">Template Display Name</Label>
+                          <Input
+                            id="tpl-name"
+                            value={tplName}
+                            disabled={!canManageTemplates}
+                            onChange={(e) => setTplName(e.target.value)}
+                          />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label htmlFor="tpl-subject">Subject Line Template</Label>
+                          <Input
+                            id="tpl-subject"
+                            value={tplSubject}
+                            disabled={!canManageTemplates}
+                            onChange={(e) => setTplSubject(e.target.value)}
+                          />
+                        </div>
+                      </div>
+
+                      <Tabs
+                        value={editorTab}
+                        onValueChange={(v) => setEditorTab(v as any)}
+                        className="w-full"
+                      >
+                        <TabsList className="grid w-full grid-cols-2">
+                          <TabsTrigger value="visual">HTML Body Template</TabsTrigger>
+                          <TabsTrigger value="code">Plain-Text Fallback</TabsTrigger>
+                        </TabsList>
+
+                        <TabsContent value="visual" className="space-y-2 pt-2">
+                          <div className="space-y-1.5">
+                            <Label htmlFor="tpl-html" className="text-xs">
+                              HTML Body (Formatted layout)
+                            </Label>
+                            <Textarea
+                              id="tpl-html"
+                              rows={6}
+                              value={tplBodyHtml}
+                              disabled={!canManageTemplates}
+                              onChange={(e) => setTplBodyHtml(e.target.value)}
+                              className="font-mono text-xs"
+                            />
+                          </div>
+                        </TabsContent>
+
+                        <TabsContent value="code" className="space-y-2 pt-2">
+                          <div className="space-y-1.5">
+                            <Label htmlFor="tpl-text" className="text-xs">
+                              Plain-Text Fallback Template (Used by non-HTML email clients)
+                            </Label>
+                            <Textarea
+                              id="tpl-text"
+                              rows={6}
+                              value={tplBodyText}
+                              disabled={!canManageTemplates}
+                              onChange={(e) => setTplBodyText(e.target.value)}
+                              className="font-mono text-xs"
+                            />
+                          </div>
+                        </TabsContent>
+                      </Tabs>
+                    </CardContent>
+                  </Card>
+
+                  {/* Live Branded HTML Preview */}
+                  <Card>
+                    <CardHeader className="pb-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <CardTitle className="flex items-center gap-2 text-base">
+                          <Eye className="size-4 text-muted-foreground" />
+                          Live Branded Preview (Sample Candidate Context)
+                        </CardTitle>
+                        <div className="flex flex-wrap gap-1" role="group" aria-label="Email preview mode">
+                          <Button
+                            type="button"
+                            size="sm"
+                            aria-pressed={previewMode === "desktop"}
+                            variant={previewMode === "desktop" ? "default" : "outline"}
+                            onClick={() => setPreviewMode("desktop")}
+                          >
+                            <Monitor className="mr-1 size-3.5" />
+                            Desktop HTML
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            aria-pressed={previewMode === "mobile"}
+                            variant={previewMode === "mobile" ? "default" : "outline"}
+                            onClick={() => setPreviewMode("mobile")}
+                          >
+                            <Smartphone className="mr-1 size-3.5" />
+                            Mobile 375px
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            aria-pressed={previewMode === "text"}
+                            variant={previewMode === "text" ? "default" : "outline"}
+                            onClick={() => setPreviewMode("text")}
+                          >
+                            <AlignLeft className="mr-1 size-3.5" />
+                            Plain Text
+                          </Button>
+                        </div>
+                      </div>
+                      <CardDescription>
+                        Rendered Subject: <strong>{editorPreview.subject}</strong>
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                      {previewMode === "text" ? (
+                        <pre className="h-80 overflow-y-auto whitespace-pre-wrap rounded-md border border-border bg-muted/30 p-4 font-mono text-xs text-foreground">
+                          {editorPreview.bodyText}
+                        </pre>
+                      ) : (
+                        <div className={previewMode === "mobile" ? "mx-auto max-w-[375px]" : ""}>
+                          <iframe
+                            title="Branded HR Email Preview"
+                            sandbox="allow-same-origin"
+                            srcDoc={editorPreview.bodyHtml}
+                            className="h-80 w-full rounded-md border border-border bg-zinc-100"
+                          />
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                </>
+              )}
             </div>
           </div>
         </TabsContent>
@@ -950,34 +1785,65 @@ function EmailCenterPage() {
                 </div>
 
                 {composeMode === "individual" ? (
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    <div className="space-y-1.5">
-                      <Label htmlFor="compose-cand">Select Candidate (Auto-Fill)</Label>
-                      <select
-                        id="compose-cand"
-                        value={composeCandidateId}
-                        onChange={(e) => handleSelectComposeCandidate(e.target.value)}
-                        className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm"
-                      >
-                        <option value="">Custom recipient / select candidate...</option>
-                        {(data?.candidates ?? []).map((c) => (
-                          <option key={c.id} value={c.id}>
-                            {c.fullName} ({c.candidateCode}) — {c.email}
-                          </option>
-                        ))}
-                      </select>
+                  composeSlug === "employee_relieving_letter" ? (
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div className="space-y-1.5">
+                        <Label htmlFor="compose-emp">Select Workforce Employee (Auto-Fill)</Label>
+                        <select
+                          id="compose-emp"
+                          value={composeEmployeeId}
+                          onChange={(e) => handleSelectComposeEmployee(e.target.value)}
+                          className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm font-medium"
+                        >
+                          <option value="">Select workforce employee...</option>
+                          {(data?.employees ?? []).map((emp: any) => (
+                            <option key={emp.id} value={emp.id}>
+                              {emp.fullName} ({emp.employeeCode}) — {emp.workEmail}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="compose-email">Recipient Work Email</Label>
+                        <Input
+                          id="compose-email"
+                          type="email"
+                          value={composeRecipientEmail}
+                          onChange={(e) => setComposeRecipientEmail(e.target.value)}
+                          placeholder="employee@theaischool.co"
+                        />
+                      </div>
                     </div>
-                    <div className="space-y-1.5">
-                      <Label htmlFor="compose-email">Recipient Email</Label>
-                      <Input
-                        id="compose-email"
-                        type="email"
-                        value={composeRecipientEmail}
-                        onChange={(e) => setComposeRecipientEmail(e.target.value)}
-                        placeholder="candidate@example.com"
-                      />
+                  ) : (
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <div className="space-y-1.5">
+                        <Label htmlFor="compose-cand">Select Candidate (Auto-Fill)</Label>
+                        <select
+                          id="compose-cand"
+                          value={composeCandidateId}
+                          onChange={(e) => handleSelectComposeCandidate(e.target.value)}
+                          className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-sm"
+                        >
+                          <option value="">Custom recipient / select candidate...</option>
+                          {(data?.candidates ?? []).map((c) => (
+                            <option key={c.id} value={c.id}>
+                              {c.fullName} ({c.candidateCode}) — {c.email}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="compose-email">Recipient Email</Label>
+                        <Input
+                          id="compose-email"
+                          type="email"
+                          value={composeRecipientEmail}
+                          onChange={(e) => setComposeRecipientEmail(e.target.value)}
+                          placeholder="candidate@example.com"
+                        />
+                      </div>
                     </div>
-                  </div>
+                  )
                 ) : null}
 
                 {composeMode === "test" ? (
@@ -996,94 +1862,109 @@ function EmailCenterPage() {
                 ) : null}
 
                 {composeMode === "bulk" ? (
-                  <div className="space-y-2">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <Label>
-                        Select Candidates ({bulkCandidateIds.length} selected)
-                      </Label>
-                      <div className="flex gap-2">
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="ghost"
-                          onClick={() =>
-                            setBulkCandidateIds(
-                              (data?.candidates ?? [])
-                                .filter((c) => {
-                                  const q = bulkSearch.trim().toLowerCase();
-                                  if (!q) return true;
-                                  return (
-                                    c.fullName.toLowerCase().includes(q) ||
-                                    c.email.toLowerCase().includes(q) ||
-                                    c.status.toLowerCase().includes(q)
-                                  );
-                                })
-                                .slice(0, 100)
-                                .map((c) => c.id),
-                            )
-                          }
-                        >
-                          Select Filtered
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => setBulkCandidateIds([])}
-                        >
-                          Clear
-                        </Button>
+                  composeSlug === "employee_relieving_letter" ? (
+                    <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3.5 text-xs text-amber-800 dark:text-amber-200 space-y-1.5">
+                      <div className="flex items-center gap-1.5 font-semibold text-sm text-amber-900 dark:text-amber-100">
+                        <AlertTriangle className="size-4 text-amber-600" />
+                        <span>Individual Legal Certification Only</span>
+                      </div>
+                      <p>
+                        Official Relieving &amp; Experience Letters contain individualized legal tenure statements, registered employer seals, and verified authorized signatures. Bulk dispatch is restricted for this document.
+                      </p>
+                      <p className="font-medium pt-1">
+                        Please switch to <strong>Individual Candidate</strong> mode above to select a workforce employee and preview or dispatch their letter.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <Label>
+                          Select Candidates ({bulkCandidateIds.length} selected)
+                        </Label>
+                        <div className="flex gap-2">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            onClick={() =>
+                              setBulkCandidateIds(
+                                (data?.candidates ?? [])
+                                  .filter((c) => {
+                                    const q = bulkSearch.trim().toLowerCase();
+                                    if (!q) return true;
+                                    return (
+                                      c.fullName.toLowerCase().includes(q) ||
+                                      c.email.toLowerCase().includes(q) ||
+                                      c.status.toLowerCase().includes(q)
+                                    );
+                                  })
+                                  .slice(0, 100)
+                                  .map((c) => c.id),
+                              )
+                            }
+                          >
+                            Select Filtered
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="ghost"
+                            onClick={() => setBulkCandidateIds([])}
+                          >
+                            Clear
+                          </Button>
+                        </div>
+                      </div>
+                      <div className="relative">
+                        <Search className="pointer-events-none absolute top-2.5 left-2.5 size-3.5 text-muted-foreground" />
+                        <Input
+                          aria-label="Filter bulk candidates"
+                          value={bulkSearch}
+                          onChange={(e) => setBulkSearch(e.target.value)}
+                          placeholder="Filter candidates by name, email, or stage..."
+                          className="h-8 pl-8 text-xs"
+                        />
+                      </div>
+                      <div className="max-h-48 space-y-1 overflow-y-auto rounded-md border border-border p-2.5">
+                        {(data?.candidates ?? []).length === 0 ? (
+                          <p className="py-4 text-center text-xs text-muted-foreground">
+                            No candidates available yet.
+                          </p>
+                        ) : (
+                          (data?.candidates ?? [])
+                            .filter((c) => {
+                              const q = bulkSearch.trim().toLowerCase();
+                              if (!q) return true;
+                              return (
+                                c.fullName.toLowerCase().includes(q) ||
+                                c.email.toLowerCase().includes(q) ||
+                                c.status.toLowerCase().includes(q)
+                              );
+                            })
+                            .map((c) => (
+                              <label
+                                key={c.id}
+                                className="flex cursor-pointer items-center justify-between gap-2 rounded px-2 py-1 text-xs hover:bg-muted/50"
+                              >
+                                <span className="flex min-w-0 items-center gap-2">
+                                  <Checkbox
+                                    checked={bulkCandidateIds.includes(c.id)}
+                                    onCheckedChange={() => toggleBulkCandidate(c.id)}
+                                  />
+                                  <span className="truncate font-medium text-foreground">
+                                    {c.fullName}
+                                  </span>
+                                  <span className="truncate text-muted-foreground">({c.email})</span>
+                                </span>
+                                <Badge variant="outline" className="shrink-0 text-[10px]">
+                                  {c.status}
+                                </Badge>
+                              </label>
+                            ))
+                        )}
                       </div>
                     </div>
-                    <div className="relative">
-                      <Search className="pointer-events-none absolute top-2.5 left-2.5 size-3.5 text-muted-foreground" />
-                      <Input
-                        aria-label="Filter bulk candidates"
-                        value={bulkSearch}
-                        onChange={(e) => setBulkSearch(e.target.value)}
-                        placeholder="Filter candidates by name, email, or stage..."
-                        className="h-8 pl-8 text-xs"
-                      />
-                    </div>
-                    <div className="max-h-48 space-y-1 overflow-y-auto rounded-md border border-border p-2.5">
-                      {(data?.candidates ?? []).length === 0 ? (
-                        <p className="py-4 text-center text-xs text-muted-foreground">
-                          No candidates available yet.
-                        </p>
-                      ) : (
-                        (data?.candidates ?? [])
-                          .filter((c) => {
-                            const q = bulkSearch.trim().toLowerCase();
-                            if (!q) return true;
-                            return (
-                              c.fullName.toLowerCase().includes(q) ||
-                              c.email.toLowerCase().includes(q) ||
-                              c.status.toLowerCase().includes(q)
-                            );
-                          })
-                          .map((c) => (
-                            <label
-                              key={c.id}
-                              className="flex cursor-pointer items-center justify-between gap-2 rounded px-2 py-1 text-xs hover:bg-muted/50"
-                            >
-                              <span className="flex min-w-0 items-center gap-2">
-                                <Checkbox
-                                  checked={bulkCandidateIds.includes(c.id)}
-                                  onCheckedChange={() => toggleBulkCandidate(c.id)}
-                                />
-                                <span className="truncate font-medium text-foreground">
-                                  {c.fullName}
-                                </span>
-                                <span className="truncate text-muted-foreground">({c.email})</span>
-                              </span>
-                              <Badge variant="outline" className="shrink-0 text-[10px]">
-                                {c.status}
-                              </Badge>
-                            </label>
-                          ))
-                      )}
-                    </div>
-                  </div>
+                  )
                 ) : null}
 
                 {/* Variable Values Grid */}
@@ -1091,22 +1972,12 @@ function EmailCenterPage() {
                   <p className="text-xs font-semibold text-foreground">
                     {composeMode === "bulk"
                       ? "Shared Fallback Variables (Used when candidate/interview field is blank)"
-                      : "Dynamic Variable Values"}
+                      : composeSlug === "employee_relieving_letter"
+                        ? "Official Relieving & Experience Letter Variables"
+                        : "Dynamic Variable Values"}
                   </p>
                   <div className="grid gap-2.5 sm:grid-cols-2">
-                    {(
-                      [
-                        "candidate_name",
-                        "designation",
-                        "department",
-                        "interview_date",
-                        "interview_time",
-                        "meeting_link",
-                        "joining_date",
-                        "employee_id",
-                        "hr_contact",
-                      ] as EmailVariableKey[]
-                    ).map((key) => (
+                    {visibleVars.map((key) => (
                       <div key={key} className="space-y-1">
                         <Label htmlFor={`var-${key}`} className="font-mono text-[11px]">
                           {`{{${key}}}`}
@@ -1140,6 +2011,18 @@ function EmailCenterPage() {
 
                 {/* Action Buttons */}
                 <div className="flex flex-wrap items-center justify-end gap-2 pt-2">
+                  {composeSlug === "employee_relieving_letter" ? (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => void handlePreviewPdf("compose")}
+                      disabled={pdfLoading}
+                    >
+                      <FileText className="mr-1.5 size-3.5 text-primary" />
+                      {pdfLoading ? "Generating PDF..." : "Preview Letter PDF"}
+                    </Button>
+                  ) : null}
+
                   {composeMode === "individual" && canSendEmails ? (
                     <Button
                       variant="outline"
@@ -1158,7 +2041,8 @@ function EmailCenterPage() {
                         !canSendEmails ||
                         !providerConfigured ||
                         dispatchBusy ||
-                        !data?.schemaReady
+                        !data?.schemaReady ||
+                        !composeRecipientEmail
                       }
                     >
                       <Send className="mr-1.5 size-3.5" />
@@ -1188,6 +2072,7 @@ function EmailCenterPage() {
                         !canSendEmails ||
                         !providerConfigured ||
                         bulkCandidateIds.length === 0 ||
+                        composeSlug === "employee_relieving_letter" ||
                         dispatchBusy ||
                         !data?.schemaReady
                       }
@@ -1205,56 +2090,146 @@ function EmailCenterPage() {
             {/* Right Live Rendered Preview */}
             <Card className="lg:col-span-5">
               <CardHeader className="pb-2">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <CardTitle className="text-base">Rendered Message Preview</CardTitle>
-                  <div className="flex flex-wrap gap-1" role="group" aria-label="Compose preview mode">
-                    <Button
-                      type="button"
-                      size="sm"
-                      aria-pressed={previewMode === "desktop"}
-                      variant={previewMode === "desktop" ? "default" : "outline"}
-                      onClick={() => setPreviewMode("desktop")}
-                    >
-                      Desktop
-                    </Button>
-                    <Button
-                      type="button"
-                      size="sm"
-                      aria-pressed={previewMode === "mobile"}
-                      variant={previewMode === "mobile" ? "default" : "outline"}
-                      onClick={() => setPreviewMode("mobile")}
-                    >
-                      375px
-                    </Button>
-                    <Button
-                      type="button"
-                      size="sm"
-                      aria-pressed={previewMode === "text"}
-                      variant={previewMode === "text" ? "default" : "outline"}
-                      onClick={() => setPreviewMode("text")}
-                    >
-                      Text
-                    </Button>
+                {composeSlug === "employee_relieving_letter" ? (
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex rounded-md border border-input p-0.5 bg-muted/40">
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant={composePreviewSubTab === "official_letter" ? "default" : "ghost"}
+                        className="h-7 text-xs px-2.5 font-semibold"
+                        onClick={() => setComposePreviewSubTab("official_letter")}
+                      >
+                        <FileText className="mr-1 size-3 text-primary" />
+                        OFFICIAL LETTER (PDF)
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant={composePreviewSubTab === "email_message" ? "default" : "ghost"}
+                        className="h-7 text-xs px-2.5"
+                        onClick={() => setComposePreviewSubTab("email_message")}
+                      >
+                        <Mail className="mr-1 size-3" />
+                        COVER EMAIL
+                      </Button>
+                    </div>
+                    <Badge variant="outline" className="text-[10px] border-primary/30 text-primary">
+                      Primary Attachment
+                    </Badge>
                   </div>
-                </div>
-                <CardDescription>
-                  Subject: <strong>{composePreview.subject}</strong>
-                </CardDescription>
+                ) : (
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <CardTitle className="text-base">Rendered Message Preview</CardTitle>
+                    <div className="flex flex-wrap gap-1" role="group" aria-label="Compose preview mode">
+                      <Button
+                        type="button"
+                        size="sm"
+                        aria-pressed={previewMode === "desktop"}
+                        variant={previewMode === "desktop" ? "default" : "outline"}
+                        onClick={() => setPreviewMode("desktop")}
+                      >
+                        Desktop
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        aria-pressed={previewMode === "mobile"}
+                        variant={previewMode === "mobile" ? "default" : "outline"}
+                        onClick={() => setPreviewMode("mobile")}
+                      >
+                        375px
+                      </Button>
+                      <Button
+                        type="button"
+                        size="sm"
+                        aria-pressed={previewMode === "text"}
+                        variant={previewMode === "text" ? "default" : "outline"}
+                        onClick={() => setPreviewMode("text")}
+                      >
+                        Text
+                      </Button>
+                    </div>
+                  </div>
+                )}
+                {composeSlug !== "employee_relieving_letter" || composePreviewSubTab === "email_message" ? (
+                  <CardDescription>
+                    Subject: <strong>{composePreview.subject}</strong>
+                  </CardDescription>
+                ) : null}
               </CardHeader>
               <CardContent>
-                {previewMode === "text" ? (
-                  <pre className="h-[460px] overflow-y-auto whitespace-pre-wrap rounded-md border border-border bg-muted/30 p-4 font-mono text-xs text-foreground">
-                    {composePreview.bodyText}
-                  </pre>
-                ) : (
-                  <div className={previewMode === "mobile" ? "mx-auto max-w-[375px]" : ""}>
-                    <iframe
-                      title="Compose Email Preview"
-                      sandbox="allow-same-origin"
-                      srcDoc={composePreview.bodyHtml}
-                      className="h-[460px] w-full rounded-md border border-border bg-zinc-100"
-                    />
+                {composeSlug === "employee_relieving_letter" && composePreviewSubTab === "official_letter" ? (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between rounded-md border border-primary/30 bg-primary/5 px-3 py-1.5 text-xs">
+                      <span className="truncate">
+                        <strong>Attachment: </strong>
+                        <code>Experience_Letter_{(composeVars.employee_name || "Employee").replace(/\s+/g, "_")}.pdf</code>
+                      </span>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        className="h-6 text-xs text-primary"
+                        onClick={() => void handlePreviewPdf("compose")}
+                      >
+                        <Eye className="mr-1 size-3" />
+                        Fullscreen Modal
+                      </Button>
+                    </div>
+                    {letterPdfBlobUrl ? (
+                      <iframe
+                        key={`compose-preview-${letterPdfBlobUrl}`}
+                        src={`${letterPdfBlobUrl}#toolbar=0&navpanes=0`}
+                        title="Attached Official Relieving Letter"
+                        className="w-full h-[540px] rounded border border-border bg-white shadow-xs"
+                      />
+                    ) : (
+                      <div className="h-[460px] flex flex-col items-center justify-center gap-2 text-xs text-muted-foreground border rounded-md">
+                        <RefreshCw className="size-5 animate-spin text-primary" />
+                        <span>Rendering official letter attachment...</span>
+                      </div>
+                    )}
                   </div>
+                ) : (
+                  <>
+                    {composeSlug === "employee_relieving_letter" ? (
+                      <div className="mb-3 flex items-center justify-between rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <FileText className="size-4 text-primary shrink-0" />
+                          <span className="truncate">
+                            <strong>Attached: </strong>
+                            <code>
+                              Experience_Letter_{(composeVars.employee_name || "Employee").replace(/\s+/g, "_")}.pdf
+                            </code>
+                          </span>
+                        </div>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          className="h-7 shrink-0 text-xs text-primary font-medium"
+                          onClick={() => void handlePreviewPdf("compose")}
+                        >
+                          Preview PDF
+                        </Button>
+                      </div>
+                    ) : null}
+                    {previewMode === "text" ? (
+                      <pre className="h-[460px] overflow-y-auto whitespace-pre-wrap rounded-md border border-border bg-muted/30 p-4 font-mono text-xs text-foreground">
+                        {composePreview.bodyText}
+                      </pre>
+                    ) : (
+                      <div className={previewMode === "mobile" ? "mx-auto max-w-[375px]" : ""}>
+                        <iframe
+                          title="Compose Email Preview"
+                          sandbox="allow-same-origin"
+                          srcDoc={composePreview.bodyHtml}
+                          className="h-[460px] w-full rounded-md border border-border bg-zinc-100"
+                        />
+                      </div>
+                    )}
+                  </>
                 )}
               </CardContent>
             </Card>
@@ -1424,7 +2399,7 @@ function EmailCenterPage() {
                                 Details
                               </Button>
                               {canSendEmails &&
-                              (msg.status === "failed" || msg.status === "draft") ? (
+                                (msg.status === "failed" || msg.status === "draft") ? (
                                 <Button
                                   size="sm"
                                   variant="outline"
@@ -1447,7 +2422,7 @@ function EmailCenterPage() {
                                 </Button>
                               ) : null}
                               {canSendEmails &&
-                              (msg.status === "draft" || msg.status === "queued") ? (
+                                (msg.status === "draft" || msg.status === "queued") ? (
                                 <Button
                                   size="sm"
                                   variant="ghost"
@@ -1604,6 +2579,63 @@ function EmailCenterPage() {
           )}
           <DialogFooter>
             <Button variant="outline" size="sm" onClick={() => setSelectedMsgForDetails(null)}>
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Relieving & Experience Letter PDF Preview Modal */}
+      <Dialog open={pdfPreviewOpen} onOpenChange={setPdfPreviewOpen}>
+        <DialogContent className="max-w-4xl h-[85vh] flex flex-col p-4 sm:p-6">
+          <DialogHeader className="pb-2">
+            <div className="flex flex-wrap items-center justify-between gap-2 pr-6">
+              <div>
+                <DialogTitle className="flex items-center gap-2 text-base">
+                  <FileText className="size-4 text-primary" />
+                  Official Experience &amp; Relieving Letter Preview (A4)
+                </DialogTitle>
+                <DialogDescription className="text-xs">
+                  Exact standard format corresponding to Word reference document (A4 single-page layout).
+                </DialogDescription>
+              </div>
+              {pdfBase64 && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    const link = document.createElement("a");
+                    link.href = `data:application/pdf;base64,${pdfBase64}`;
+                    link.download = `Experience_Letter_${(composeVars.employee_name || "Official").replace(/\s+/g, "_")}.pdf`;
+                    link.click();
+                  }}
+                >
+                  <Download className="mr-1.5 size-3.5" />
+                  Download PDF
+                </Button>
+              )}
+            </div>
+          </DialogHeader>
+
+          <div className="flex-1 w-full bg-muted/40 rounded-lg overflow-hidden border border-border flex items-center justify-center min-h-[400px]">
+            {pdfLoading ? (
+              <div className="flex flex-col items-center gap-2 text-sm text-muted-foreground">
+                <RefreshCw className="size-6 animate-spin text-primary" />
+                <span>Generating official letter PDF...</span>
+              </div>
+            ) : pdfBase64 ? (
+              <iframe
+                title="Relieving Letter PDF Preview"
+                src={`data:application/pdf;base64,${pdfBase64}#toolbar=0`}
+                className="w-full h-full border-0"
+              />
+            ) : (
+              <p className="text-sm text-muted-foreground">Failed to generate PDF preview.</p>
+            )}
+          </div>
+
+          <DialogFooter className="pt-2">
+            <Button variant="outline" size="sm" onClick={() => setPdfPreviewOpen(false)}>
               Close
             </Button>
           </DialogFooter>

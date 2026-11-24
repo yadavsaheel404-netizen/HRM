@@ -182,7 +182,9 @@ export function EmployeeDetailDrawer({
                     )}
                     <Badge
                       variant={
-                        profile.employment_status === "inactive"
+                        (profile.employment_status as any) === "relieved"
+                          ? "outline"
+                          : profile.employment_status === "inactive"
                           ? "neutral"
                           : profile.account_status === "active"
                           ? "success"
@@ -190,9 +192,17 @@ export function EmployeeDetailDrawer({
                           ? "warning"
                           : "info"
                       }
-                      className="text-[10px] capitalize"
+                      className={`text-[10px] capitalize ${
+                        (profile.employment_status as any) === "relieved"
+                          ? "bg-purple-50 text-purple-700 border-purple-200 dark:bg-purple-950/40 dark:text-purple-300 font-bold"
+                          : ""
+                      }`}
                     >
-                      {profile.employment_status === "inactive" ? "Deactivated" : profile.account_status.replace(/_/g, " ")}
+                      {(profile.employment_status as any) === "relieved"
+                        ? "Relieved"
+                        : profile.employment_status === "inactive"
+                        ? "Deactivated"
+                        : profile.account_status.replace(/_/g, " ")}
                     </Badge>
                   </div>
 
@@ -681,6 +691,24 @@ export function EmployeeDetailDrawer({
               </Button>
 
               <div className="flex items-center gap-2">
+                {canManageWorkforce && (profile.employment_status as any) !== "relieved" && (
+                  <Button asChild size="sm" variant="outline" className="h-8 text-xs gap-1">
+                    <Link to={"/employee-relieving" as any}>
+                      <FileCheck className="size-3.5 mr-1 text-red-600" />
+                      <span>Initiate Relieving</span>
+                    </Link>
+                  </Button>
+                )}
+
+                {(profile.employment_status as any) === "relieved" && (
+                  <Button asChild size="sm" variant="outline" className="h-8 text-xs gap-1 border-purple-200 text-purple-700 hover:bg-purple-50">
+                    <Link to={"/employee-relieving" as any}>
+                      <FileCheck className="size-3.5 mr-1" />
+                      <span>Relieving Record</span>
+                    </Link>
+                  </Button>
+                )}
+
                 {canManageWorkforce && profile.employment_status === "active" && (
                   <Button
                     type="button"

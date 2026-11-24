@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { reconcileScheduledBreaks } from "@/lib/breaks.functions";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -106,9 +108,8 @@ export function BreakTracker({
   const [customHours, setCustomHours] = useState<number>(0);
   const [customMinutes, setCustomMinutes] = useState<number>(30);
   const [customReason, setCustomReason] = useState<string>("");
-
-  // Collapsible history state (collapsed by default as required)
   const [isHistoryExpanded, setIsHistoryExpanded] = useState<boolean>(false);
+  const queryClient = useQueryClient();
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -139,6 +140,29 @@ export function BreakTracker({
   const hasTakenShortBreakToday = useMemo(() => {
     return breaks.some((b) => b.category === "short_break" && b.is_legacy !== true);
   }, [breaks]);
+
+  // Proactively reconcile scheduled breaks when short break or lunch window is active
+  useEffect(() => {
+    if (shortBreakWindow.canStart && !hasTakenShortBreakToday && !openBreak && checkedIn && !checkedOut) {
+      void reconcileScheduledBreaks().then((res) => {
+        if (res?.activeBreak) {
+          void queryClient.invalidateQueries({ queryKey: ["current-active-break"] });
+          void onRefresh();
+        }
+      });
+    }
+  }, [shortBreakWindow.canStart, hasTakenShortBreakToday, openBreak, checkedIn, checkedOut, queryClient, onRefresh]);
+
+  useEffect(() => {
+    if (lunchWindow.canStart && !hasTakenLunchToday && !openBreak && checkedIn && !checkedOut) {
+      void reconcileScheduledBreaks().then((res) => {
+        if (res?.activeBreak) {
+          void queryClient.invalidateQueries({ queryKey: ["current-active-break"] });
+          void onRefresh();
+        }
+      });
+    }
+  }, [lunchWindow.canStart, hasTakenLunchToday, openBreak, checkedIn, checkedOut, queryClient, onRefresh]);
 
   // Latest personalized break request for today
   const latestPersonalRequest = useMemo(() => {
@@ -439,6 +463,20 @@ export function BreakTracker({
                     <span className="font-semibold text-primary animate-pulse">
                       ● Active (Click End Break in timer)
                     </span>
+                  ) : lunchWindow.canStart && checkedIn && !checkedOut ? (
+                    <Button
+                      size="sm"
+                      className="w-full bg-red-600 hover:bg-red-700 text-white font-semibold text-xs h-8"
+                      onClick={async () => {
+                        const res = await reconcileScheduledBreaks();
+                        if (res?.activeBreak) {
+                          await queryClient.invalidateQueries({ queryKey: ["current-active-break"] });
+                          await onRefresh();
+                        }
+                      }}
+                    >
+                      Enter Full-Screen Lunch Break
+                    </Button>
                   ) : (
                     <span className="text-muted-foreground">
                       Automatically starts at <strong className="text-foreground">1:30 PM IST</strong>
@@ -527,6 +565,20 @@ export function BreakTracker({
                     <span className="font-semibold text-primary animate-pulse">
                       ● Active (Click End Break in timer)
                     </span>
+                  ) : shortBreakWindow.canStart && checkedIn && !checkedOut ? (
+                    <Button
+                      size="sm"
+                      className="w-full bg-red-600 hover:bg-red-700 text-white font-semibold text-xs h-8"
+                      onClick={async () => {
+                        const res = await reconcileScheduledBreaks();
+                        if (res?.activeBreak) {
+                          await queryClient.invalidateQueries({ queryKey: ["current-active-break"] });
+                          await onRefresh();
+                        }
+                      }}
+                    >
+                      Enter Full-Screen Short Break
+                    </Button>
                   ) : (
                     <span className="text-muted-foreground">
                       Automatically starts at <strong className="text-foreground">4:45 PM IST</strong>

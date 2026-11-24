@@ -92,8 +92,7 @@ export function AppShell({
     refetchOnWindowFocus: true,
   });
 
-  const activeBreak =
-    propActiveBreak !== undefined ? propActiveBreak : (activeBreakData?.activeBreak ?? null);
+  const activeBreak = propActiveBreak || (activeBreakData?.activeBreak ?? null);
 
   const navGroups = buildRoleNavigation(actor);
   const execOnly = isExecutiveGovernanceOnly(actor.roles);

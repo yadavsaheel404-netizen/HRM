@@ -9,6 +9,8 @@ import {
   calculateExpectedReturn,
   calculateBreakCompletion,
   evaluateScheduledBreakEligibility,
+  getIstWallClock,
+  SHORT_BREAK_WINDOW,
   type ValidBreakCategory,
 } from "./breaks/break-management";
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
@@ -604,117 +606,144 @@ export async function reconcileScheduledBreaksInternal(
   // 3. Fetch all completed or existing breaks for today to check if lunch or short break was already taken
   const { data: existingBreaks } = await admin
     .from("break_logs")
-    .select("category, is_legacy")
-    .eq("day_id", day.id)
-    .eq("is_legacy", false);
+    .select("category, is_legacy, ended_at")
+    .eq("day_id", day.id);
 
-  const hasLunch = (existingBreaks || []).some((b: any) => b.category === "lunch");
-  const hasShortBreak = (existingBreaks || []).some((b: any) => b.category === "short_break");
+  const hasLunch = (existingBreaks || []).some((b: any) => b.category === "lunch" && b.is_legacy !== true);
+  const hasShortBreak = (existingBreaks || []).some((b: any) => b.category === "short_break" && b.is_legacy !== true);
 
-  // 4. Check Lunch auto-start eligibility (1:30 PM - 2:30 PM IST)
-  if (!hasLunch) {
-    const lunchEval = evaluateScheduledBreakEligibility("lunch", {
-      checkInAt: day.check_in_at,
-      checkOutAt: day.check_out_at,
-      currentTime: now,
-      workDate,
-    });
+  const currentIst = getIstWallClock(now);
+  const isShortBreakTime =
+    currentIst.totalSecondsFromMidnight >= SHORT_BREAK_WINDOW.startHour * 3600 + SHORT_BREAK_WINDOW.startMinute * 60;
 
-    if (lunchEval.eligible) {
-      // Auto-insert lunch break using server-authoritative timestamps
-      const { data: newLunch, error: lunchErr } = await admin
-        .from("break_logs")
-        .insert({
-          day_id: day.id,
-          user_id: userId,
-          category: "lunch",
-          started_at: lunchEval.startedAtIso,
-          expected_end_at: lunchEval.expectedEndIso,
-          allowed_minutes: lunchEval.allowedMinutes,
-          return_status: "on_time",
-          overtime_seconds: 0,
-          is_legacy: false,
-          note: "Auto-started scheduled lunch break",
-        })
-        .select(
-          "id, category, started_at, expected_end_at, allowed_minutes, return_status, overtime_seconds, break_request_id, note",
-        )
-        .single();
+  // 4. If in or past short break time (4:45 PM IST), prioritize evaluating Short Break
+  if (isShortBreakTime) {
+    if (!hasShortBreak) {
+      const shortEval = evaluateScheduledBreakEligibility("short_break", {
+        checkInAt: day.check_in_at,
+        checkOutAt: day.check_out_at,
+        currentTime: now,
+        workDate,
+      });
 
-      if (!lunchErr && newLunch) {
-        await writeAudit(supabaseAdmin, {
-          actorId: userId,
-          action: "break.auto_started",
-          entityType: "break_logs",
-          entityId: newLunch.id,
-          detail: {
-            category: "lunch",
-            started_at: newLunch.started_at,
-            expected_end_at: newLunch.expected_end_at,
-            allowed_minutes: newLunch.allowed_minutes,
-            schedule: "1:30 PM - 2:30 PM IST",
-          },
-        });
-        return {
-          activeBreak: {
-            ...newLunch,
-            work_date: workDate,
-          },
-        };
+      if (shortEval.eligible) {
+        const { data: newShort, error: shortErr } = await admin
+          .from("break_logs")
+          .insert({
+            day_id: day.id,
+            user_id: userId,
+            category: "short_break",
+            started_at: shortEval.startedAtIso,
+            expected_end_at: shortEval.expectedEndIso,
+            allowed_minutes: shortEval.allowedMinutes,
+            return_status: "on_time",
+            overtime_seconds: 0,
+            is_legacy: false,
+            note: "Auto-started scheduled short break",
+          })
+          .select(
+            "id, category, started_at, expected_end_at, allowed_minutes, return_status, overtime_seconds, break_request_id, note",
+          )
+          .single();
+
+        if (shortErr?.code === "23505") {
+          const { data: existingOpen } = await admin
+            .from("break_logs")
+            .select("id, category, started_at, expected_end_at, allowed_minutes, return_status, overtime_seconds, break_request_id, note")
+            .eq("user_id", userId)
+            .is("ended_at", null)
+            .maybeSingle();
+          if (existingOpen) {
+            return { activeBreak: { ...existingOpen, work_date: workDate } };
+          }
+        }
+
+        if (!shortErr && newShort) {
+          await writeAudit(supabaseAdmin, {
+            actorId: userId,
+            action: "break.auto_started",
+            entityType: "break_logs",
+            entityId: newShort.id,
+            detail: {
+              category: "short_break",
+              started_at: newShort.started_at,
+              expected_end_at: newShort.expected_end_at,
+              allowed_minutes: newShort.allowed_minutes,
+              schedule: "4:45 PM - 5:00 PM IST",
+            },
+          });
+          return {
+            activeBreak: {
+              ...newShort,
+              work_date: workDate,
+            },
+          };
+        }
       }
     }
-  }
+  } else {
+    // 5. If before short break time, evaluate Lunch Break (1:30 PM - 2:30 PM IST)
+    if (!hasLunch) {
+      const lunchEval = evaluateScheduledBreakEligibility("lunch", {
+        checkInAt: day.check_in_at,
+        checkOutAt: day.check_out_at,
+        currentTime: now,
+        workDate,
+      });
 
-  // 5. Check Short Break auto-start eligibility (4:45 PM - 5:00 PM IST)
-  if (!hasShortBreak) {
-    const shortEval = evaluateScheduledBreakEligibility("short_break", {
-      checkInAt: day.check_in_at,
-      checkOutAt: day.check_out_at,
-      currentTime: now,
-      workDate,
-    });
+      if (lunchEval.eligible) {
+        const { data: newLunch, error: lunchErr } = await admin
+          .from("break_logs")
+          .insert({
+            day_id: day.id,
+            user_id: userId,
+            category: "lunch",
+            started_at: lunchEval.startedAtIso,
+            expected_end_at: lunchEval.expectedEndIso,
+            allowed_minutes: lunchEval.allowedMinutes,
+            return_status: "on_time",
+            overtime_seconds: 0,
+            is_legacy: false,
+            note: "Auto-started scheduled lunch break",
+          })
+          .select(
+            "id, category, started_at, expected_end_at, allowed_minutes, return_status, overtime_seconds, break_request_id, note",
+          )
+          .single();
 
-    if (shortEval.eligible) {
-      // Auto-insert short break using server-authoritative timestamps
-      const { data: newShort, error: shortErr } = await admin
-        .from("break_logs")
-        .insert({
-          day_id: day.id,
-          user_id: userId,
-          category: "short_break",
-          started_at: shortEval.startedAtIso,
-          expected_end_at: shortEval.expectedEndIso,
-          allowed_minutes: shortEval.allowedMinutes,
-          return_status: "on_time",
-          overtime_seconds: 0,
-          is_legacy: false,
-          note: "Auto-started scheduled short break",
-        })
-        .select(
-          "id, category, started_at, expected_end_at, allowed_minutes, return_status, overtime_seconds, break_request_id, note",
-        )
-        .single();
+        if (lunchErr?.code === "23505") {
+          const { data: existingOpen } = await admin
+            .from("break_logs")
+            .select("id, category, started_at, expected_end_at, allowed_minutes, return_status, overtime_seconds, break_request_id, note")
+            .eq("user_id", userId)
+            .is("ended_at", null)
+            .maybeSingle();
+          if (existingOpen) {
+            return { activeBreak: { ...existingOpen, work_date: workDate } };
+          }
+        }
 
-      if (!shortErr && newShort) {
-        await writeAudit(supabaseAdmin, {
-          actorId: userId,
-          action: "break.auto_started",
-          entityType: "break_logs",
-          entityId: newShort.id,
-          detail: {
-            category: "short_break",
-            started_at: newShort.started_at,
-            expected_end_at: newShort.expected_end_at,
-            allowed_minutes: newShort.allowed_minutes,
-            schedule: "4:45 PM - 5:00 PM IST",
-          },
-        });
-        return {
-          activeBreak: {
-            ...newShort,
-            work_date: workDate,
-          },
-        };
+        if (!lunchErr && newLunch) {
+          await writeAudit(supabaseAdmin, {
+            actorId: userId,
+            action: "break.auto_started",
+            entityType: "break_logs",
+            entityId: newLunch.id,
+            detail: {
+              category: "lunch",
+              started_at: newLunch.started_at,
+              expected_end_at: newLunch.expected_end_at,
+              allowed_minutes: newLunch.allowed_minutes,
+              schedule: "1:30 PM - 2:30 PM IST",
+            },
+          });
+          return {
+            activeBreak: {
+              ...newLunch,
+              work_date: workDate,
+            },
+          };
+        }
       }
     }
   }

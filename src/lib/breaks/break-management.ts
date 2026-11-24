@@ -47,7 +47,7 @@ export type ScheduledBreakEligibility =
   | {
       eligible: false;
       reason: string;
-      code: "not_yet_due" | "late_checkin" | "not_checked_in" | "already_checked_out";
+      code: "not_yet_due" | "late_checkin" | "not_checked_in" | "already_checked_out" | "after_window";
     };
 
 /**
@@ -84,11 +84,19 @@ export function evaluateScheduledBreakEligibility(
 
   if (category === "lunch") {
     const windowStartSeconds = LUNCH_WINDOW.startHour * 3600 + LUNCH_WINDOW.startMinute * 60; // 13:30 = 48,600s
+    const windowEndSeconds = LUNCH_WINDOW.endHour * 3600 + LUNCH_WINDOW.endMinute * 60; // 14:30 = 52,200s
     if (currentIst.totalSecondsFromMidnight < windowStartSeconds) {
       return {
         eligible: false,
         code: "not_yet_due",
         reason: "Lunch break automatically starts at 1:30 PM IST.",
+      };
+    }
+    if (currentIst.totalSecondsFromMidnight > windowEndSeconds) {
+      return {
+        eligible: false,
+        code: "after_window",
+        reason: "Lunch break window (1:30 PM – 2:30 PM IST) has closed.",
       };
     }
     // If employee checked in after 1:30 PM IST, do not backdate a break they didn't take
@@ -110,11 +118,19 @@ export function evaluateScheduledBreakEligibility(
 
   // category === "short_break"
   const windowStartSeconds = SHORT_BREAK_WINDOW.startHour * 3600 + SHORT_BREAK_WINDOW.startMinute * 60; // 16:45 = 60,300s
+  const windowEndSeconds = SHORT_BREAK_WINDOW.endHour * 3600 + SHORT_BREAK_WINDOW.endMinute * 60; // 17:00 = 61,200s
   if (currentIst.totalSecondsFromMidnight < windowStartSeconds) {
     return {
       eligible: false,
       code: "not_yet_due",
       reason: "Short break automatically starts at 4:45 PM IST.",
+    };
+  }
+  if (currentIst.totalSecondsFromMidnight > windowEndSeconds) {
+    return {
+      eligible: false,
+      code: "after_window",
+      reason: "Short break window (4:45 PM – 5:00 PM IST) has closed.",
     };
   }
   // If employee checked in after 4:45 PM IST, do not backdate

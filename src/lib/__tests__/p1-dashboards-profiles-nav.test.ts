@@ -216,6 +216,7 @@ describe("Phase P1 — Role-Relevant Sidebar Navigation & Hub Consolidation", ()
     expect(paths).toContain("/team");
     expect(paths).toContain("/projects");
     expect(paths).toContain("/workforce");
+    expect(paths).toContain("/records");
     expect(paths).toContain("/onboarding");
 
     expect(paths).not.toContain("/my-day");
@@ -248,9 +249,10 @@ describe("Phase P1 — Role-Relevant Sidebar Navigation & Hub Consolidation", ()
     const groups = buildRoleNavigation(sa);
     const allItems = groups.flatMap((g) => g.items);
 
-    // Consolidated well below the old 16-item flat list (includes dedicated /employee-relieving)
-    expect(allItems.length).toBeLessThanOrEqual(12);
+    // Consolidated well below the old 16-item flat list (includes /employee-relieving and /records)
+    expect(allItems.length).toBeLessThanOrEqual(13);
     expect(allItems.some((i) => i.to === "/employee-relieving")).toBe(true);
+    expect(allItems.some((i) => i.to === "/records")).toBe(true);
 
     const invitesItem = allItems.find((i) => i.to === "/invitations")!;
     expect(isNavItemActive("/invitations", invitesItem)).toBe(true);

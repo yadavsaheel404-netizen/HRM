@@ -1,9 +1,12 @@
 // Server-only PDF Generator for Official Relieving & Experience Letters
 // Uses pdf-lib to construct high-fidelity A4 corporate documents matching the authoritative template.
 
-import fs from "node:fs";
-import path from "node:path";
 import { PDFDocument, rgb, StandardFonts, degrees } from "pdf-lib";
+import {
+  getRelievingFooterPng,
+  getRelievingHeaderPng,
+  getRelievingSignatureStampPng,
+} from "../../server/assets/relieving/assets.server";
 import { formatLetterDate, type RelievingLetterData } from "./types";
 
 export { formatLetterDate };
@@ -120,35 +123,27 @@ export async function generateRelievingLetterPdf(data: RelievingLetterData): Pro
   const rightMargin = 48;
   const contentWidth = pageWidth - leftMargin - rightMargin;
 
-  // 1. Embed and draw Header Banner at the very top (edge-to-edge)
-  const headerPath = path.resolve(process.cwd(), "public", "branding", "relieving", "header-banner.png");
-  if (fs.existsSync(headerPath)) {
-    const headerBytes = fs.readFileSync(headerPath);
-    const headerImage = await pdfDoc.embedPng(headerBytes);
-    // Aspect ratio: 1024 x 306
-    const headerHeight = (306 / 1024) * pageWidth; // ~177.89 pt
-    page.drawImage(headerImage, {
-      x: 0,
-      y: pageHeight - headerHeight,
-      width: pageWidth,
-      height: headerHeight,
-    });
-  }
+  // 1. Embed and draw Header Banner at the very top (edge-to-edge, native aspect ratio)
+  const headerBytes = getRelievingHeaderPng();
+  const headerImage = await pdfDoc.embedPng(headerBytes);
+  const headerHeight = (headerImage.height / headerImage.width) * pageWidth;
+  page.drawImage(headerImage, {
+    x: 0,
+    y: pageHeight - headerHeight,
+    width: pageWidth,
+    height: headerHeight,
+  });
 
-  // 2. Embed and draw Footer Banner at the very bottom (edge-to-edge)
-  const footerPath = path.resolve(process.cwd(), "public", "branding", "relieving", "footer-banner.png");
-  if (fs.existsSync(footerPath)) {
-    const footerBytes = fs.readFileSync(footerPath);
-    const footerImage = await pdfDoc.embedPng(footerBytes);
-    // Aspect ratio: 1024 x 119
-    const footerHeight = (119 / 1024) * pageWidth; // ~69.19 pt
-    page.drawImage(footerImage, {
-      x: 0,
-      y: 0,
-      width: pageWidth,
-      height: footerHeight,
-    });
-  }
+  // 2. Embed and draw Footer Banner at the very bottom (edge-to-edge, native aspect ratio)
+  const footerBytes = getRelievingFooterPng();
+  const footerImage = await pdfDoc.embedPng(footerBytes);
+  const footerHeight = (footerImage.height / footerImage.width) * pageWidth;
+  page.drawImage(footerImage, {
+    x: 0,
+    y: 0,
+    width: pageWidth,
+    height: footerHeight,
+  });
 
   // 3. Document Content Layout
   // Content starts below the header banner
@@ -321,31 +316,41 @@ export async function generateRelievingLetterPdf(data: RelievingLetterData): Pro
 
   // Stamp and Signature Image (Private server asset)
   // Dedicated footprint: no text above, below, or behind it.
-  const stampPath = path.resolve(
-    process.cwd(),
-    "src",
-    "server",
-    "assets",
-    "relieving",
-    "official-signature-stamp.png"
-  );
-
   const stampTopMargin = 14;
   const stampTopY = companyNameY - stampTopMargin;
-  // Aspect ratio: 192 w x 219 h
+  const includeSignature = data.includeSignature !== false;
   const stampWidth = 84;
-  const stampHeight = (219 / 192) * stampWidth; // ~95.8 pt
-  const stampBottomY = stampTopY - stampHeight;
+  let stampHeight = 96;
+  let stampBottomY = stampTopY - stampHeight;
 
-  if (fs.existsSync(stampPath)) {
-    const stampBytes = fs.readFileSync(stampPath);
+  if (includeSignature) {
+    const stampBytes = getRelievingSignatureStampPng();
     const stampImage = await pdfDoc.embedPng(stampBytes);
+    stampHeight = (stampImage.height / stampImage.width) * stampWidth;
+    stampBottomY = stampTopY - stampHeight;
     // Draw image cleanly in its dedicated container box: [leftMargin, stampBottomY] to [leftMargin + stampWidth, stampTopY]
     page.drawImage(stampImage, {
       x: leftMargin,
       y: stampBottomY,
       width: stampWidth,
       height: stampHeight,
+    });
+  } else {
+    // Explicit placeholder when signature is intentionally withheld pending approval
+    page.drawRectangle({
+      x: leftMargin,
+      y: stampBottomY,
+      width: 140,
+      height: 54,
+      borderColor: rgb(0.75, 0.75, 0.78),
+      borderWidth: 0.75,
+    });
+    page.drawText("Authorized Signature Pending", {
+      x: leftMargin + 10,
+      y: stampBottomY + 24,
+      size: 8,
+      font: regularFont,
+      color: rgb(0.45, 0.45, 0.5),
     });
   }
 

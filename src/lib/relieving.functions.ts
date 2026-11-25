@@ -518,6 +518,9 @@ export const finalizeAndRelieveEmployee = createServerFn({ method: "POST" })
       },
     });
 
+    const { syncProfileToEmployeeRecordSafe } = await import("./records/sync.server");
+    await syncProfileToEmployeeRecordSafe(row.user_id, context.userId);
+
     return { ok: true, storagePath };
   });
 
@@ -532,6 +535,15 @@ export const previewRelievingLetter = createServerFn({ method: "POST" })
     isDraft?: boolean;
   }) => input)
   .handler(async ({ data, context }) => {
+    const actor = await loadActor(context.supabase, context.userId);
+    const hasOrgAccess =
+      actor.permissions.includes("relieving:read:all") ||
+      actor.permissions.includes("emails:read:all");
+    const hasSelfAccess = actor.permissions.includes("relieving:read:self");
+    if (!hasOrgAccess && !hasSelfAccess) {
+      throw new Error("Forbidden: You do not have permission to preview relieving letters.");
+    }
+
     let letterData = data.letterData;
 
     if (data.caseId) {
@@ -540,6 +552,12 @@ export const previewRelievingLetter = createServerFn({ method: "POST" })
         .eq("id", data.caseId)
         .single();
       if (error) rethrowDbError("Fetching case for preview failed", error);
+      if (
+        !hasOrgAccess &&
+        (row.user_id !== context.userId || !["approved", "relieved"].includes(row.status))
+      ) {
+        throw new Error("Forbidden: You can only preview your own approved relieving letter.");
+      }
 
       letterData = {
         employeeName: row.employee_name,
@@ -558,6 +576,8 @@ export const previewRelievingLetter = createServerFn({ method: "POST" })
         companyAddress: row.company_address,
         isDraft: data.isDraft ?? true,
       };
+    } else if (!hasOrgAccess) {
+      throw new Error("Forbidden: Custom letter previews require HR or Email Center permissions.");
     }
 
     if (!letterData) {
@@ -567,9 +587,13 @@ export const previewRelievingLetter = createServerFn({ method: "POST" })
     const isDraft = data.isDraft !== undefined ? data.isDraft : true;
     const pdfBytes = await generateRelievingLetterPdf({ ...letterData, isDraft });
     const base64 = Buffer.from(pdfBytes).toString("base64");
+    const { getRelievingSignatureStampDataUri } = await import(
+      "../server/assets/relieving/assets.server"
+    );
 
     return {
       base64,
+      signatureDataUri: hasOrgAccess ? getRelievingSignatureStampDataUri() : null,
       byteLength: pdfBytes.length,
       mimeType: "application/pdf",
     };

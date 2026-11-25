@@ -23,7 +23,8 @@ export type NavIconKey =
   | "reports"
   | "org"
   | "automation"
-  | "relieving";
+  | "relieving"
+  | "records";
 
 export type RoleNavItem = {
   to: string;
@@ -94,6 +95,7 @@ export function buildRoleNavigation(
   const canAutomation = actorCan(fullActor, "automation:run:all");
   const canImports = actorCan(fullActor, "import:manage:all");
   const canRelieving = actorCan(fullActor, "relieving:read:all");
+  const canRecords = actorCan(fullActor, "records:read:all");
 
   const personalItems: RoleNavItem[] = [
     ...(canMyDay
@@ -172,6 +174,14 @@ export function buildRoleNavigation(
         label: "Workforce Directory",
         iconKey: "workforce",
         matchPrefixes: ["/workforce"],
+      });
+    }
+    if (canRecords) {
+      items.push({
+        to: "/records",
+        label: "Employee Records",
+        iconKey: "records",
+        matchPrefixes: ["/records"],
       });
     }
     if (canRequests) {
@@ -351,6 +361,14 @@ export function buildRoleNavigation(
         matchPrefixes: ["/workforce"],
       });
     }
+    if (canRecords) {
+      hrItems.push({
+        to: "/records",
+        label: "Employee Records",
+        iconKey: "records",
+        matchPrefixes: ["/records"],
+      });
+    }
     if (canRelieving) {
       hrItems.push({
         to: "/employee-relieving",
@@ -477,6 +495,14 @@ export function buildRoleNavigation(
       label: primaryRole === "super_admin" ? "Workforce & Roles" : "Workforce Directory",
       iconKey: "workforce",
       matchPrefixes: ["/workforce"],
+    });
+  }
+  if (canRecords) {
+    peopleAndGovItems.push({
+      to: "/records",
+      label: "Employee Records",
+      iconKey: "records",
+      matchPrefixes: ["/records"],
     });
   }
   if (canRelieving) {

@@ -12,6 +12,7 @@
 import { supabaseAdmin } from "@/integrations/supabase/client.server";
 import { writeAudit } from "../audit.server";
 import { assignableRolesFor, type AppRole } from "../permissions";
+import { syncProfileToEmployeeRecordSafe } from "../records/sync.server";
 import { todayIso } from "../timezone";
 import {
   type DuplicateSource,
@@ -240,6 +241,9 @@ export async function provisionEmployee(params: {
       setup_email_sent: false,
     },
   });
+
+  // 6. Auto-sync newly onboarded employee into Employee Records master register.
+  await syncProfileToEmployeeRecordSafe(userId, actorId);
 
   return { outcome: "created", userId, employeeCode, replayed: false };
 }

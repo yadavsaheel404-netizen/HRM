@@ -616,6 +616,9 @@ export const updateMyProfile = createServerFn({ method: "POST" })
       .eq("id", context.userId)
       .eq("account_status", "activated");
 
+    const { syncProfileToEmployeeRecordSafe } = await import("./records/sync.server");
+    await syncProfileToEmployeeRecordSafe(context.userId, context.userId);
+
     return { ok: true };
   });
 
@@ -786,6 +789,8 @@ export const updateEmploymentDetails = createServerFn({ method: "POST" })
       entityId: data.userId,
       detail: patch,
     });
+    const { syncProfileToEmployeeRecordSafe } = await import("./records/sync.server");
+    await syncProfileToEmployeeRecordSafe(data.userId, userId);
     return { ok: true };
   });
 
@@ -855,6 +860,9 @@ export const setEmployeeWorkType = createServerFn({ method: "POST" })
         reason: data.reason,
       },
     });
+
+    const { syncProfileToEmployeeRecordSafe } = await import("./records/sync.server");
+    await syncProfileToEmployeeRecordSafe(data.userId, userId);
 
     return { ok: true, unchanged: false, workType: data.workType };
   });
@@ -1267,6 +1275,9 @@ export const deactivateEmployee = createServerFn({ method: "POST" })
       detail: { reason: data.reason },
     });
 
+    const { syncProfileToEmployeeRecordSafe } = await import("./records/sync.server");
+    await syncProfileToEmployeeRecordSafe(data.userId, userId);
+
     return { ok: true };
   });
 
@@ -1306,6 +1317,9 @@ export const reactivateEmployee = createServerFn({ method: "POST" })
       entityType: "profile",
       entityId: data.userId,
     });
+
+    const { syncProfileToEmployeeRecordSafe } = await import("./records/sync.server");
+    await syncProfileToEmployeeRecordSafe(data.userId, userId);
 
     return { ok: true };
   });

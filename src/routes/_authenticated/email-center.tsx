@@ -233,7 +233,7 @@ function EmailCenterPage() {
 
   // PDF Preview modal state
   const [pdfPreviewOpen, setPdfPreviewOpen] = useState(false);
-  const [pdfBase64, setPdfBase64] = useState<string | null>(null);
+  const [pdfPreviewBlobUrl, setPdfPreviewBlobUrl] = useState<string | null>(null);
   const [pdfLoading, setPdfLoading] = useState(false);
 
   // Dedicated Relieving Letter state (Primary View)
@@ -242,6 +242,7 @@ function EmailCenterPage() {
   const [letterViewMode, setLetterViewMode] = useState<"pdf" | "document">("pdf");
   const [isDraftMode, setIsDraftMode] = useState(false);
   const [letterPdfBlobUrl, setLetterPdfBlobUrl] = useState<string | null>(null);
+  const [letterSignatureDataUri, setLetterSignatureDataUri] = useState<string | null>(null);
   const [letterPdfLoading, setLetterPdfLoading] = useState(false);
   const [selectedEmployeeId, setSelectedEmployeeId] = useState<string>("");
 
@@ -435,6 +436,9 @@ function EmailCenterPage() {
         if (prev) URL.revokeObjectURL(prev);
         return url;
       });
+      if (res.signatureDataUri) {
+        setLetterSignatureDataUri(res.signatureDataUri);
+      }
     } catch (err) {
       toast.error(describeUnknownError(err));
     } finally {
@@ -446,7 +450,6 @@ function EmailCenterPage() {
     try {
       setPdfLoading(true);
       setPdfPreviewOpen(true);
-      setPdfBase64(null);
 
       const vars = source === "compose" ? composeVars : SAMPLE_EMAIL_VARIABLES;
       const dataToRender: RelievingLetterData = source === "compose" ? {
@@ -474,7 +477,19 @@ function EmailCenterPage() {
         },
       });
 
-      setPdfBase64(res.base64);
+      const binaryString = atob(res.base64);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      const url = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+      setPdfPreviewBlobUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return url;
+      });
+      if (res.signatureDataUri) {
+        setLetterSignatureDataUri(res.signatureDataUri);
+      }
     } catch (err) {
       toast.error(describeUnknownError(err));
       setPdfPreviewOpen(false);
@@ -1296,11 +1311,18 @@ function EmailCenterPage() {
 
                                 {/* Dedicated Signature & Stamp Container with fixed margin, min-height, and no absolute overlap */}
                                 <div className="my-3 min-h-[96px] flex items-center">
-                                  <div className="w-36 h-24 border border-dashed border-blue-400/60 rounded-md bg-blue-50/50 flex flex-col items-center justify-center text-[10px] text-blue-700 font-mono p-2 text-center shadow-xs">
-                                    <CheckCircle2 className="size-4 text-blue-600 mb-1" />
-                                    <span className="font-semibold text-blue-900">Official Seal &amp; Signature</span>
-                                    <span className="text-[9px] text-blue-600">Learning Paths Technologies LLP</span>
-                                  </div>
+                                  {letterSignatureDataUri ? (
+                                    <img
+                                      src={letterSignatureDataUri}
+                                      alt="Authorized Learning Paths Technologies LLP Signature and Seal"
+                                      className="h-24 w-auto object-contain select-none"
+                                    />
+                                  ) : (
+                                    <div className="w-40 h-20 border border-dashed border-zinc-300 rounded-md bg-zinc-50 flex flex-col items-center justify-center text-[10px] text-zinc-600 font-mono p-2 text-center">
+                                      <span className="font-semibold text-zinc-700">Authorized Signature Pending</span>
+                                      <span className="text-[9px] text-zinc-500">Click Update Preview to load</span>
+                                    </div>
+                                  )}
                                 </div>
 
                                 <div className="space-y-0.5">
@@ -2599,13 +2621,13 @@ function EmailCenterPage() {
                   Exact standard format corresponding to Word reference document (A4 single-page layout).
                 </DialogDescription>
               </div>
-              {pdfBase64 && (
+              {pdfPreviewBlobUrl && (
                 <Button
                   size="sm"
                   variant="outline"
                   onClick={() => {
                     const link = document.createElement("a");
-                    link.href = `data:application/pdf;base64,${pdfBase64}`;
+                    link.href = pdfPreviewBlobUrl;
                     link.download = `Experience_Letter_${(composeVars.employee_name || "Official").replace(/\s+/g, "_")}.pdf`;
                     link.click();
                   }}
@@ -2623,10 +2645,11 @@ function EmailCenterPage() {
                 <RefreshCw className="size-6 animate-spin text-primary" />
                 <span>Generating official letter PDF...</span>
               </div>
-            ) : pdfBase64 ? (
+            ) : pdfPreviewBlobUrl ? (
               <iframe
+                key={pdfPreviewBlobUrl}
                 title="Relieving Letter PDF Preview"
-                src={`data:application/pdf;base64,${pdfBase64}#toolbar=0`}
+                src={`${pdfPreviewBlobUrl}#toolbar=0&navpanes=0`}
                 className="w-full h-full border-0"
               />
             ) : (

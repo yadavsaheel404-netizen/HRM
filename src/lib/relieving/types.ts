@@ -80,6 +80,7 @@ export interface RelievingLetterData {
   companyContact?: string;
   companyAddress?: string;
   isDraft?: boolean;
+  includeSignature?: boolean;
 }
 
 /**

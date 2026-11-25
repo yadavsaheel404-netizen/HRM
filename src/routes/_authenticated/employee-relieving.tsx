@@ -335,8 +335,16 @@ function EmployeeRelievingPage() {
       const res = await previewRelievingLetter({
         data: { caseId: c.id, isDraft },
       });
-      const dataUri = `data:application/pdf;base64,${res.base64}`;
-      setPreviewPdfUrl(dataUri);
+      const binaryString = atob(res.base64);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      const blobUrl = URL.createObjectURL(new Blob([bytes], { type: "application/pdf" }));
+      setPreviewPdfUrl((prev) => {
+        if (prev && prev.startsWith("blob:")) URL.revokeObjectURL(prev);
+        return blobUrl;
+      });
       setIsPreviewOpen(true);
     } catch (err: any) {
       toast.error(err.message || "Failed to generate preview.");

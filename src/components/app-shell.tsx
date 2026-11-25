@@ -2,6 +2,7 @@ import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlarmClock,
+  Archive,
   BarChart3,
   Bot,
   Briefcase,
@@ -64,6 +65,7 @@ const NAV_ICONS: Record<NavIconKey, LucideIcon> = {
   org: Building2,
   automation: Bot,
   relieving: FileCheck,
+  records: Archive,
 };
 
 export function AppShell({

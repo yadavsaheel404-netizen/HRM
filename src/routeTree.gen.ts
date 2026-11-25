@@ -24,6 +24,7 @@ import { Route as AuthenticatedMyProjectsRouteImport } from './routes/_authentic
 import { Route as AuthenticatedOfficeLocationsRouteImport } from './routes/_authenticated/office-locations'
 import { Route as AuthenticatedOnboardingRouteImport } from './routes/_authenticated/onboarding'
 import { Route as AuthenticatedOrgRouteImport } from './routes/_authenticated/org'
+import { Route as AuthenticatedRecordsRouteImport } from './routes/_authenticated/records'
 import { Route as AuthenticatedReportsRouteImport } from './routes/_authenticated/reports'
 import { Route as AuthenticatedRequestsRouteImport } from './routes/_authenticated/requests'
 import { Route as AuthenticatedReviewsRouteImport } from './routes/_authenticated/reviews'
@@ -117,6 +118,11 @@ const AuthenticatedOnboardingRoute = AuthenticatedOnboardingRouteImport.update({
 const AuthenticatedOrgRoute = AuthenticatedOrgRouteImport.update({
   id: '/org',
   path: '/org',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
+const AuthenticatedRecordsRoute = AuthenticatedRecordsRouteImport.update({
+  id: '/records',
+  path: '/records',
   getParentRoute: () => AuthenticatedRouteRoute,
 } as any)
 const AuthenticatedReportsRoute = AuthenticatedReportsRouteImport.update({
@@ -225,6 +231,7 @@ export interface FileRoutesByFullPath {
   '/office-locations': typeof AuthenticatedOfficeLocationsRoute
   '/onboarding': typeof AuthenticatedOnboardingRoute
   '/org': typeof AuthenticatedOrgRoute
+  '/records': typeof AuthenticatedRecordsRoute
   '/reports': typeof AuthenticatedReportsRoute
   '/requests': typeof AuthenticatedRequestsRoute
   '/reviews': typeof AuthenticatedReviewsRoute
@@ -257,6 +264,7 @@ export interface FileRoutesByTo {
   '/office-locations': typeof AuthenticatedOfficeLocationsRoute
   '/onboarding': typeof AuthenticatedOnboardingRoute
   '/org': typeof AuthenticatedOrgRoute
+  '/records': typeof AuthenticatedRecordsRoute
   '/reports': typeof AuthenticatedReportsRoute
   '/requests': typeof AuthenticatedRequestsRoute
   '/reviews': typeof AuthenticatedReviewsRoute
@@ -291,6 +299,7 @@ export interface FileRoutesById {
   '/_authenticated/office-locations': typeof AuthenticatedOfficeLocationsRoute
   '/_authenticated/onboarding': typeof AuthenticatedOnboardingRoute
   '/_authenticated/org': typeof AuthenticatedOrgRoute
+  '/_authenticated/records': typeof AuthenticatedRecordsRoute
   '/_authenticated/reports': typeof AuthenticatedReportsRoute
   '/_authenticated/requests': typeof AuthenticatedRequestsRoute
   '/_authenticated/reviews': typeof AuthenticatedReviewsRoute
@@ -325,6 +334,7 @@ export interface FileRouteTypes {
     | '/office-locations'
     | '/onboarding'
     | '/org'
+    | '/records'
     | '/reports'
     | '/requests'
     | '/reviews'
@@ -357,6 +367,7 @@ export interface FileRouteTypes {
     | '/office-locations'
     | '/onboarding'
     | '/org'
+    | '/records'
     | '/reports'
     | '/requests'
     | '/reviews'
@@ -390,6 +401,7 @@ export interface FileRouteTypes {
     | '/_authenticated/office-locations'
     | '/_authenticated/onboarding'
     | '/_authenticated/org'
+    | '/_authenticated/records'
     | '/_authenticated/reports'
     | '/_authenticated/requests'
     | '/_authenticated/reviews'
@@ -526,6 +538,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedOrgRouteImport
       parentRoute: typeof AuthenticatedRouteRoute
     }
+    '/_authenticated/records': {
+      id: '/_authenticated/records'
+      path: '/records'
+      fullPath: '/records'
+      preLoaderRoute: typeof AuthenticatedRecordsRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
     '/_authenticated/reports': {
       id: '/_authenticated/reports'
       path: '/reports'
@@ -654,6 +673,7 @@ interface AuthenticatedRouteRouteChildren {
   AuthenticatedOfficeLocationsRoute: typeof AuthenticatedOfficeLocationsRoute
   AuthenticatedOnboardingRoute: typeof AuthenticatedOnboardingRoute
   AuthenticatedOrgRoute: typeof AuthenticatedOrgRoute
+  AuthenticatedRecordsRoute: typeof AuthenticatedRecordsRoute
   AuthenticatedReportsRoute: typeof AuthenticatedReportsRoute
   AuthenticatedRequestsRoute: typeof AuthenticatedRequestsRoute
   AuthenticatedReviewsRoute: typeof AuthenticatedReviewsRoute
@@ -680,6 +700,7 @@ const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedOfficeLocationsRoute: AuthenticatedOfficeLocationsRoute,
   AuthenticatedOnboardingRoute: AuthenticatedOnboardingRoute,
   AuthenticatedOrgRoute: AuthenticatedOrgRoute,
+  AuthenticatedRecordsRoute: AuthenticatedRecordsRoute,
   AuthenticatedReportsRoute: AuthenticatedReportsRoute,
   AuthenticatedRequestsRoute: AuthenticatedRequestsRoute,
   AuthenticatedReviewsRoute: AuthenticatedReviewsRoute,

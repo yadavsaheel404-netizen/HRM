@@ -71,6 +71,9 @@ export const PERMISSION_KEYS = [
   "relieving:approve:all",
   "relieving:send:all",
   "relieving:read:self",
+  "records:read:all",
+  "records:manage:all",
+  "records:documents:read",
 ] as const;
 
 export type PermissionKey = (typeof PERMISSION_KEYS)[number];
@@ -208,11 +211,61 @@ export function canAccessEmployeeDocuments(
 /** Permissions Founder is never allowed to hold (strict read-only oversight). */
 export function isReadOnlySafePermission(permissionKey: string): boolean {
   if (permissionKey === "reports:export:scoped") return true;
-  if (permissionKey === "documents:read:all" || permissionKey === "documents:read:team") {
+  if (
+    permissionKey === "documents:read:all" ||
+    permissionKey === "documents:read:team" ||
+    permissionKey === "records:documents:read"
+  ) {
     return false;
   }
   const parts = permissionKey.split(":");
   return parts[1] === "read";
+}
+
+/**
+ * Confidential Employee Records fields (historical Google Drive folder links,
+ * personal emails, phone numbers, home addresses, and raw document metadata)
+ * may ONLY be accessed by authorized HR and Super Admin.
+ */
+export function canViewRecordConfidentialFields(
+  actorRoles: readonly string[],
+  actorPermissions: readonly string[],
+): boolean {
+  if (actorRoles.includes("super_admin")) return true;
+  return (
+    actorRoles.includes("hr") && actorPermissions.includes("records:documents:read")
+  );
+}
+
+/**
+ * Mutating historical Employee Records (create, edit, bulk import, Drive link matching,
+ * Workforce sync reconciliation) is restricted to HR and Super Admin.
+ */
+export function canManageEmployeeRecords(
+  actorRoles: readonly string[],
+  actorPermissions: readonly string[],
+): boolean {
+  if (actorRoles.includes("super_admin")) return true;
+  return actorRoles.includes("hr") && actorPermissions.includes("records:manage:all");
+}
+
+/**
+ * Exporting Employee Records (CSV/XLSX) is permitted to Super Admin, HR, and Founder
+ * (Founder receives a confidential-redacted overview only).
+ */
+export function canExportEmployeeRecords(
+  actorRoles: readonly string[],
+  actorPermissions: readonly string[],
+): boolean {
+  if (actorRoles.includes("super_admin")) return true;
+  if (actorRoles.includes("hr") && actorPermissions.includes("records:read:all")) {
+    return true;
+  }
+  return (
+    actorRoles.includes("founder") &&
+    actorPermissions.includes("records:read:all") &&
+    actorPermissions.includes("reports:export:scoped")
+  );
 }
 
 export type ScopedOrgGraph = {
@@ -520,6 +573,9 @@ const MANAGER_FORBIDDEN_ORG_WIDE_KEYS: readonly PermissionKey[] = [
   "emails:read:all",
   "emails:manage:all",
   "emails:send:all",
+  "records:read:all",
+  "records:manage:all",
+  "records:documents:read",
 ];
 
 const RECRUITMENT_ADMIN_KEYS: readonly PermissionKey[] = [
@@ -531,6 +587,9 @@ const RECRUITMENT_ADMIN_KEYS: readonly PermissionKey[] = [
   "emails:read:all",
   "emails:manage:all",
   "emails:send:all",
+  "records:read:all",
+  "records:manage:all",
+  "records:documents:read",
 ];
 
 /**
@@ -586,6 +645,9 @@ export function normalizeEffectivePermissions(
     next.add("relieving:manage:all");
     next.add("relieving:approve:all");
     next.add("relieving:send:all");
+    next.add("records:read:all");
+    next.add("records:manage:all");
+    next.add("records:documents:read");
   }
   if (roles.includes("admin")) {
     next.add("attendance:update:all");
@@ -637,6 +699,7 @@ export function normalizeEffectivePermissions(
     next.add("recruitment:read:all");
     next.add("interviews:read:all");
     next.add("emails:read:all");
+    next.add("records:read:all");
   }
 
   // Pure Manager / Lead accounts never hold org-wide :all permissions
@@ -668,6 +731,11 @@ export function normalizeEffectivePermissions(
   if (!roles.includes("hr")) {
     next.delete("documents:read:all");
     next.delete("documents:verify:all");
+    next.delete("records:manage:all");
+    next.delete("records:documents:read");
+  }
+  if (!roles.includes("hr") && !roles.includes("founder")) {
+    next.delete("records:read:all");
   }
   next.delete("documents:read:team");
 

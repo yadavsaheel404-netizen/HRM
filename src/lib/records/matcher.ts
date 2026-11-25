@@ -9,6 +9,7 @@ import {
   validateGoogleDriveFolderUrl,
   type DriveFolderMappingRow,
   type DriveMappingPreviewRow,
+  type EmployeeRecordItem,
   type ImportCandidateMatch,
   type ImportPreviewRow,
   type ImportPreviewSummary,
@@ -17,6 +18,7 @@ import {
   type RecordEmploymentStatus,
   type RecordStatusSource,
   type RecordWorkType,
+  type RecordsListFilters,
   type SourceColumnMapping,
 } from "./types";
 
@@ -438,7 +440,15 @@ export function matchImportRowsAgainstDirectory(
 
   const matchedProfileIds = new Set<string>();
 
-  // Pass 2: Run 6-tier matching + duplicate detection + validation
+  // Sequential intra-file tracking so the FIRST valid occurrence imports and
+  // any SUBSEQUENT repeated row in the same file is rejected as duplicate_in_file.
+  const seenFileTasCodes = new Map<string, number>();
+  const seenFileOrgEmails = new Map<string, number>();
+  const seenFilePersonalEmails = new Map<string, { rowNumber: number; normName: string; tasCode: string | null; orgEmail: string | null }>();
+  const seenFilePhoneName = new Map<string, number>();
+  const seenFileExactNameNoContact = new Map<string, number>();
+
+  // Pass 2: Validate, detect DB duplicates (Workforce + Records), and reject intra-file repeats
   const rows: ImportPreviewRow[] = preliminary.map((item) => {
     const errors: string[] = [];
     const warnings: string[] = [];
@@ -470,34 +480,6 @@ export function matchImportRowsAgainstDirectory(
       }
     }
 
-    // Intra-file duplicates
-    const dupRowSet = new Set<number>();
-    const addDupRows = (arr: number[] | undefined, reason: string) => {
-      if (!arr || arr.length <= 1) return;
-      for (const r of arr) {
-        if (r !== item.rowNumber) dupRowSet.add(r);
-      }
-      warnings.push(reason);
-    };
-    addDupRows(
-      item.organizationEmail ? fileOrgEmails.get(item.organizationEmail) : undefined,
-      `Duplicate TAS Mail (${item.organizationEmail}) in uploaded file.`,
-    );
-    addDupRows(
-      item.personalEmail ? filePersonalEmails.get(item.personalEmail) : undefined,
-      `Duplicate personal E-Mail ID (${item.personalEmail}) in uploaded file.`,
-    );
-    addDupRows(
-      item.normPhone ? filePhones.get(item.normPhone) : undefined,
-      `Shared phone number (${item.phoneDisplay}) appears on multiple rows in uploaded file.`,
-    );
-    addDupRows(
-      item.normName ? fileNames.get(item.normName) : undefined,
-      `Duplicate full name "${item.displayName}" appears multiple times in uploaded file.`,
-    );
-    const duplicateWithRowNumbers = [...dupRowSet].sort((a, b) => a - b);
-
-    // 6-Tier Matching Resolution (unless HR manually pinned matchedProfileId / matchedRecordId)
     const candidates: ImportCandidateMatch[] = [];
     const seenCandidateKey = new Set<string>();
     const pushCand = (c: ImportCandidateMatch) => {
@@ -510,123 +492,156 @@ export function matchImportRowsAgainstDirectory(
 
     let matchedProfileId: string | null = item.ov?.matchedProfileId ?? null;
     let matchedRecordId: string | null = item.ov?.matchedRecordId ?? null;
-    let matchedTasCode: string | null = null;
+    let matchedTasCode: string | null = item.tasCode;
     let matchSignal: string | null = null;
     let matchConfidence: ImportPreviewRow["matchConfidence"] = "unmatched";
+    let duplicateReason: string | null = null;
+    const duplicateWithRowNumbers: number[] = [];
 
-    // Tier 1: Explicit HR override / existing verified linkage
-    if (matchedProfileId && wfById.has(matchedProfileId)) {
-      const w = wfById.get(matchedProfileId)!;
-      matchedRecordId = recByProfileId.get(w.profileId)?.id ?? matchedRecordId;
-      matchedTasCode = w.employeeCode;
-      matchSignal = "hr_verified_link";
-      matchConfidence = "exact";
-      pushCand(toCandidateFromWf(w, "HR verified linkage"));
-    } else if (matchedRecordId) {
-      const rec = directory.records.find((r) => r.id === matchedRecordId);
-      if (rec) {
-        matchedProfileId = rec.profileId;
-        matchedTasCode = rec.tasEmployeeCode;
-        matchSignal = "hr_verified_record_link";
-        matchConfidence = "exact";
-        pushCand(toCandidateFromRec(rec, "HR selected existing record"));
+    // 1. Check existing Workforce + Employee Records by stable identifiers:
+    //    (a) TAS Employee ID, (b) Organization Email, (c) Personal Email (when identity matches or lacks distinct ID),
+    //    (d) Phone + Full Name together (never reject distinct people solely for sharing a phone!).
+    if (item.tasCode) {
+      for (const w of wfByCode.get(item.tasCode) ?? []) {
+        pushCand(toCandidateFromWf(w, `Existing Workforce ID ${item.tasCode}`));
+      }
+      for (const r of recByCode.get(item.tasCode) ?? []) {
+        pushCand(toCandidateFromRec(r, `Existing Employee ID ${item.tasCode}`));
+      }
+    }
+    if (item.organizationEmail) {
+      for (const w of wfByWorkEmail.get(item.organizationEmail) ?? []) {
+        pushCand(toCandidateFromWf(w, `Existing Work Email (${item.organizationEmail})`));
+      }
+      for (const r of recByOrgEmail.get(item.organizationEmail) ?? []) {
+        pushCand(toCandidateFromRec(r, `Existing Organization Email (${item.organizationEmail})`));
+      }
+    }
+    if (item.personalEmail) {
+      const pHits: ImportCandidateMatch[] = [
+        ...(wfByPersonalEmail.get(item.personalEmail) ?? []).map((w) =>
+          toCandidateFromWf(w, `Matching Personal Email (${item.personalEmail})`),
+        ),
+        ...(recByPersonalEmail.get(item.personalEmail) ?? []).map((r) =>
+          toCandidateFromRec(r, `Matching Personal Email (${item.personalEmail})`),
+        ),
+      ];
+      for (const c of pHits) {
+        const sameName = normalizeName(c.displayName) === item.normName;
+        const distinctByStrongId = Boolean(item.tasCode && c.tasEmployeeCode && item.tasCode !== c.tasEmployeeCode.toUpperCase());
+        if (!distinctByStrongId && (sameName || !item.tasCode || !item.organizationEmail)) {
+          pushCand(c);
+        } else {
+          warnings.push(`Shares personal email ${item.personalEmail} with ${c.displayName} (different ID/name — allowed as distinct person).`);
+        }
+      }
+    }
+    if (candidates.length === 0 && item.normPhone) {
+      const phoneHits: ImportCandidateMatch[] = [
+        ...(wfByPhone.get(item.normPhone) ?? []).map((w) =>
+          toCandidateFromWf(w, "Matching Phone + Full Name"),
+        ),
+        ...(recByPhone.get(item.normPhone) ?? []).map((r) =>
+          toCandidateFromRec(r, "Matching Phone + Full Name"),
+        ),
+      ];
+      for (const c of phoneHits) {
+        if (item.normName && normalizeName(c.displayName) === item.normName) {
+          pushCand(c);
+        } else {
+          warnings.push(`Phone ${item.phoneDisplay} is also listed for ${c.displayName} (distinct employee — not rejected).`);
+        }
       }
     }
 
-    // Gather all potential candidates across tiers 2..6 when not manually resolved
-    if (!matchSignal) {
-      // Tier 2: Exact normalized organization email
-      if (item.organizationEmail) {
-        for (const w of wfByWorkEmail.get(item.organizationEmail) ?? []) {
-          pushCand(toCandidateFromWf(w, "Exact organization email (TAS Mail)"));
-        }
-        for (const r of recByOrgEmail.get(item.organizationEmail) ?? []) {
-          pushCand(toCandidateFromRec(r, "Exact organization email (TAS Mail)"));
-        }
-      }
-      // Tier 3: Exact normalized personal email
-      if (item.personalEmail) {
-        for (const w of wfByPersonalEmail.get(item.personalEmail) ?? []) {
-          pushCand(toCandidateFromWf(w, "Exact personal email (E-Mail ID)"));
-        }
-        for (const r of recByPersonalEmail.get(item.personalEmail) ?? []) {
-          pushCand(toCandidateFromRec(r, "Exact personal email (E-Mail ID)"));
-        }
-      }
-      // Tier 4: Verified TAS Employee ID
-      if (item.tasCode) {
-        for (const w of wfByCode.get(item.tasCode) ?? []) {
-          pushCand(toCandidateFromWf(w, "Verified TAS Employee ID"));
-        }
-        for (const r of recByCode.get(item.tasCode) ?? []) {
-          pushCand(toCandidateFromRec(r, "Verified TAS Employee ID"));
-        }
-      }
+    let isDuplicateExisting = false;
+    let isDuplicateInFile = false;
 
-      // Auto-resolve ONLY if Tiers 2-4 identify a single unambiguous identity
-      const strongCandidates = [...candidates];
-      if (strongCandidates.length === 1 && duplicateWithRowNumbers.length === 0) {
-        const win = strongCandidates[0]!;
-        matchedProfileId = win.profileId;
-        matchedRecordId = win.recordId;
-        matchedTasCode = win.tasEmployeeCode;
-        matchSignal = win.matchSignal;
-        matchConfidence = "exact";
-      } else if (strongCandidates.length > 1) {
+    if (candidates.length > 0) {
+      const win = candidates[0]!;
+      matchedProfileId = win.profileId;
+      matchedRecordId = win.recordId;
+      matchedTasCode = win.tasEmployeeCode ?? item.tasCode;
+      matchSignal = win.matchSignal;
+      matchConfidence = "exact";
+      isDuplicateExisting = true;
+      duplicateReason = `Already exists in ${win.source === "workforce" ? "Workforce" : "Employee Records"}: ${win.displayName}${win.tasEmployeeCode ? ` (${win.tasEmployeeCode})` : ""} — ${win.matchSignal}.`;
+    }
+
+    // Name-only review candidates (when no DB duplicate triggered yet, and no distinct email/ID)
+    if (!isDuplicateExisting && item.normName && !item.organizationEmail && !item.tasCode) {
+      for (const w of wfByName.get(item.normName) ?? []) {
+        pushCand(toCandidateFromWf(w, "Same full name (no email/ID to disambiguate)"));
+      }
+      for (const r of recByName.get(item.normName) ?? []) {
+        pushCand(toCandidateFromRec(r, "Same full name (no email/ID to disambiguate)"));
+      }
+      if (candidates.length > 0) {
         matchConfidence = "needs_review";
-        matchSignal = "multiple_email_or_id_matches";
-        warnings.push("Multiple possible Workforce/Record matches found — requires manual review.");
+        matchSignal = "name_only_review_candidate";
+        warnings.push(
+          `Name "${item.displayName}" matches an existing person without a unique ID or email — review required.`,
+        );
+      }
+    }
+
+    // 2. Check intra-file duplicates against earlier rows in this same file
+    if (!isDuplicateExisting && errors.length === 0) {
+      let dupRowNum: number | null = null;
+      let dupWhy = "";
+
+      if (item.tasCode && seenFileTasCodes.has(item.tasCode)) {
+        dupRowNum = seenFileTasCodes.get(item.tasCode)!;
+        dupWhy = `same Employee ID (${item.tasCode})`;
+      } else if (item.organizationEmail && seenFileOrgEmails.has(item.organizationEmail)) {
+        dupRowNum = seenFileOrgEmails.get(item.organizationEmail)!;
+        dupWhy = `same Organization Email (${item.organizationEmail})`;
+      } else if (item.personalEmail && seenFilePersonalEmails.has(item.personalEmail)) {
+        const prev = seenFilePersonalEmails.get(item.personalEmail)!;
+        const sameName = prev.normName === item.normName;
+        const distinctIds = Boolean(item.tasCode && prev.tasCode && item.tasCode !== prev.tasCode);
+        if (!distinctIds && (sameName || !item.tasCode || !item.organizationEmail)) {
+          dupRowNum = prev.rowNumber;
+          dupWhy = `same Personal Email (${item.personalEmail})`;
+        } else {
+          warnings.push(`Shares personal email ${item.personalEmail} with row #${prev.rowNumber} (distinct ID/name — allowed).`);
+        }
+      } else if (item.normPhone && item.normName && seenFilePhoneName.has(`${item.normPhone}|${item.normName}`)) {
+        dupRowNum = seenFilePhoneName.get(`${item.normPhone}|${item.normName}`)!;
+        dupWhy = `same Name and Phone (${item.phoneDisplay})`;
+      } else if (
+        !item.tasCode &&
+        !item.organizationEmail &&
+        !item.personalEmail &&
+        !item.normPhone &&
+        item.normName &&
+        seenFileExactNameNoContact.has(item.normName)
+      ) {
+        dupRowNum = seenFileExactNameNoContact.get(item.normName)!;
+        dupWhy = `repeated name "${item.displayName}" with no unique identifier`;
       }
 
-      // Tier 5: Phone number (supporting signal only)
-      if (!matchSignal && item.normPhone) {
-        for (const w of wfByPhone.get(item.normPhone) ?? []) {
-          pushCand(toCandidateFromWf(w, "Supporting phone number match"));
+      if (dupRowNum !== null) {
+        isDuplicateInFile = true;
+        duplicateWithRowNumbers.push(dupRowNum);
+        duplicateReason = `Duplicate of row #${dupRowNum} in this import file (${dupWhy}).`;
+      } else {
+        // Register first valid occurrence in seenFile maps
+        if (item.tasCode) seenFileTasCodes.set(item.tasCode, item.rowNumber);
+        if (item.organizationEmail) seenFileOrgEmails.set(item.organizationEmail, item.rowNumber);
+        if (item.personalEmail && !seenFilePersonalEmails.has(item.personalEmail)) {
+          seenFilePersonalEmails.set(item.personalEmail, {
+            rowNumber: item.rowNumber,
+            normName: item.normName,
+            tasCode: item.tasCode,
+            orgEmail: item.organizationEmail,
+          });
         }
-        for (const r of recByPhone.get(item.normPhone) ?? []) {
-          pushCand(toCandidateFromRec(r, "Supporting phone number match"));
+        if (item.normPhone && item.normName) {
+          seenFilePhoneName.set(`${item.normPhone}|${item.normName}`, item.rowNumber);
         }
-        if (candidates.length > 0) {
-          // Only promote to high confidence if phone AND normalized full name both match uniquely
-          const phoneAndName = candidates.filter(
-            (c) => normalizeName(c.displayName) === item.normName,
-          );
-          if (
-            candidates.length === 1 &&
-            phoneAndName.length === 1 &&
-            duplicateWithRowNumbers.length === 0
-          ) {
-            const win = phoneAndName[0]!;
-            matchedProfileId = win.profileId;
-            matchedRecordId = win.recordId;
-            matchedTasCode = win.tasEmployeeCode;
-            matchSignal = "Phone + exact full name";
-            matchConfidence = "high";
-            warnings.push("Matched via Phone + Name (no email match) — please confirm.");
-          } else {
-            matchConfidence = "needs_review";
-            matchSignal = "phone_requires_review";
-            warnings.push(
-              "Matched by phone number without exact email — do not merge automatically without HR review.",
-            );
-          }
-        }
-      }
-
-      // Tier 6: Normalized full name as review candidate ONLY (never auto-merged!)
-      if (!matchSignal && item.normName) {
-        for (const w of wfByName.get(item.normName) ?? []) {
-          pushCand(toCandidateFromWf(w, "Full name similarity (review candidate only)"));
-        }
-        for (const r of recByName.get(item.normName) ?? []) {
-          pushCand(toCandidateFromRec(r, "Full name similarity (review candidate only)"));
-        }
-        if (candidates.length > 0) {
-          matchConfidence = "needs_review";
-          matchSignal = "name_only_review_candidate";
-          warnings.push(
-            `Name "${item.displayName}" matches existing person — review before linking (never auto-merged on name alone).`,
-          );
+        if (!item.tasCode && !item.organizationEmail && !item.personalEmail && !item.normPhone && item.normName) {
+          seenFileExactNameNoContact.set(item.normName, item.rowNumber);
         }
       }
     }
@@ -644,11 +659,6 @@ export function matchImportRowsAgainstDirectory(
       todayIso: directory.todayIso,
     });
 
-    if (statusInfo.statusNeedsReview) {
-      warnings.push("Employment status cannot be verified from Workforce or LWD — marked for review.");
-    }
-
-    // Completeness computation (on missing fields)
     const { missingFields } = computeRecordCompleteness({
       lastName: item.lastName,
       personalEmail: item.personalEmail ?? linkedWf?.personalEmail ?? null,
@@ -672,20 +682,17 @@ export function matchImportRowsAgainstDirectory(
       item.lwdParsed.status === "needs_review" ||
       Boolean(item.dojParsed.iso && item.lwdParsed.iso && item.lwdParsed.iso < item.dojParsed.iso);
 
-    const hasAmbiguousMatch =
-      matchConfidence === "needs_review" || duplicateWithRowNumbers.length > 0;
-
     let category: ImportPreviewRow["category"];
     if (errors.length > 0) {
       category = "invalid";
-    } else if (hasAmbiguousMatch) {
+    } else if (isDuplicateExisting) {
+      category = "duplicate_existing";
+    } else if (isDuplicateInFile) {
+      category = "duplicate_in_file";
+    } else if (matchConfidence === "needs_review") {
       category = "possible_duplicate";
     } else if (hasAmbiguousDates) {
       category = "needs_information";
-    } else if (matchedProfileId) {
-      category = "matched_workforce";
-    } else if (matchedRecordId) {
-      category = "existing_historical";
     } else {
       category = "new_historical";
     }
@@ -694,8 +701,7 @@ export function matchImportRowsAgainstDirectory(
     const readyToImport =
       !excluded &&
       errors.length === 0 &&
-      category !== "possible_duplicate" &&
-      !hasAmbiguousDates;
+      category === "new_historical";
 
     return {
       rowNumber: item.rowNumber,
@@ -733,6 +739,7 @@ export function matchImportRowsAgainstDirectory(
       matchedTasCode,
       candidates,
       duplicateWithRowNumbers,
+      duplicateReason,
       missingFields,
       warnings,
       errors,
@@ -757,12 +764,18 @@ export function matchImportRowsAgainstDirectory(
       joiningDate: w.joiningDate,
     }));
 
+  const duplicateExistingCount = rows.filter((r) => r.category === "duplicate_existing").length;
+  const duplicateInFileCount = rows.filter((r) => r.category === "duplicate_in_file").length;
+
   const summary: ImportPreviewSummary = {
     totalRows: rows.length,
-    matchedWorkforceCount: rows.filter((r) => r.category === "matched_workforce").length,
+    matchedWorkforceCount: duplicateExistingCount,
     newHistoricalCount: rows.filter((r) => r.category === "new_historical").length,
-    existingHistoricalCount: rows.filter((r) => r.category === "existing_historical").length,
+    existingHistoricalCount: 0,
     missingWorkforceCount: missingWorkforceProfiles.length,
+    duplicateExistingCount,
+    duplicateInFileCount,
+    duplicateCount: duplicateExistingCount + duplicateInFileCount,
     possibleDuplicatesCount: rows.filter((r) => r.category === "possible_duplicate").length,
     needsInformationCount: rows.filter((r) => r.category === "needs_information").length,
     invalidCount: rows.filter((r) => r.category === "invalid").length,
@@ -954,4 +967,270 @@ export function matchDriveFolderLinks(
       confirmed: false,
     };
   });
+}
+
+export type UnifiedWorkforceProfileInput = {
+  id: string;
+  employeeCode: string | null;
+  fullName: string;
+  workEmail: string;
+  personalEmail: string | null;
+  mobile: string | null;
+  address: string | null;
+  joiningDate: string | null;
+  lastWorkingDay: string | null;
+  employmentStatus: string;
+  category: string;
+  workType: string | null;
+  departmentId: string | null;
+  departmentName: string | null;
+  designation: string | null;
+  reportingLeadId: string | null;
+  reportingLeadName: string | null;
+  hasRelievedCase: boolean;
+  relievingEffectiveDate: string | null;
+  legalEmployer: string | null;
+  createdAt: string;
+};
+
+/**
+ * Merges live non-protected Workforce profiles with existing `employee_records`
+ * into one unified, duplicate-free register keyed by canonical employee identity.
+ */
+export function mergeWorkforceAndRecords(args: {
+  workforce: readonly UnifiedWorkforceProfileInput[];
+  records: readonly EmployeeRecordItem[];
+  kycSummaries: ReadonlyMap<string, import("./types").KycSummarySnapshot>;
+  todayIso: string;
+}): EmployeeRecordItem[] {
+  const recByProfileId = new Map<string, EmployeeRecordItem>();
+  for (const r of args.records) {
+    if (r.profileId) recByProfileId.set(r.profileId, r);
+  }
+
+  const unified: EmployeeRecordItem[] = [];
+
+  for (const p of args.workforce) {
+    const existing = recByProfileId.get(p.id);
+    const kyc = args.kycSummaries.get(p.id) ?? existing?.kycSummary ?? null;
+    const hasKyc = Boolean(
+      kyc && ((kyc.uploadedCount ?? 0) > 0 || (kyc.verifiedCount ?? 0) > 0 || (kyc.pendingCount ?? 0) > 0),
+    );
+    const hasDrive = Boolean(existing?.hasDriveFolder || existing?.driveFolderUrl);
+
+    const statusInfo = classifyEmploymentStatus({
+      workforceEmploymentStatus: p.employmentStatus,
+      hasRelievedCase: p.hasRelievedCase,
+      todayIso: args.todayIso,
+    });
+    const parts = splitDisplayName(p.fullName || p.workEmail.split("@")[0] || "Employee");
+    const cat = normalizeCategoryInput(p.category);
+    const wt = normalizeWorkTypeInput(p.workType);
+    const docSource =
+      hasDrive && hasKyc
+        ? "BOTH"
+        : hasDrive
+          ? "HISTORICAL_GOOGLE_DRIVE"
+          : hasKyc
+            ? "HRM_KYC"
+            : "NONE";
+    const docAvail =
+      hasDrive || ((kyc?.verifiedCount ?? 0) > 0 && (kyc?.verifiedCount ?? 0) >= (kyc?.requiredCount ?? 5))
+        ? "available"
+        : hasKyc
+          ? "partial"
+          : "missing";
+
+    const mergedDisplayName = p.fullName.trim() || existing?.displayName || p.workEmail;
+    const mergedFirstName = parts.firstName || existing?.firstName || mergedDisplayName;
+    const mergedLastName = parts.lastName ?? existing?.lastName ?? null;
+    const mergedPersonalEmail = p.personalEmail || existing?.personalEmail || null;
+    const mergedOrgEmail = p.workEmail || existing?.organizationEmail || null;
+    const mergedPhone = p.mobile || existing?.phoneNumber || null;
+    const mergedAddress = p.address || existing?.address || null;
+    const mergedJoining = p.joiningDate || existing?.joiningDate || null;
+    const mergedLwd = p.relievingEffectiveDate || p.lastWorkingDay || existing?.lastWorkingDate || null;
+    const mergedDeptId = p.departmentId || existing?.departmentId || null;
+    const mergedDeptName = p.departmentName || existing?.departmentName || null;
+    const mergedDesig = p.designation || existing?.designation || null;
+    const comp = computeRecordCompleteness({
+      lastName: mergedLastName,
+      personalEmail: mergedPersonalEmail,
+      organizationEmail: mergedOrgEmail,
+      phoneNumber: mergedPhone,
+      address: mergedAddress,
+      joiningDate: mergedJoining,
+      employmentCategory: cat !== "unknown" ? cat : existing?.employmentCategory,
+      workType: wt !== "unknown" ? wt : existing?.workType,
+      departmentId: mergedDeptId,
+      departmentName: mergedDeptName,
+      designation: mergedDesig,
+      documentSource: docSource,
+    });
+
+    unified.push({
+      id: existing?.id ?? `wf:${p.id}`,
+      historicalRecordCode:
+        existing?.historicalRecordCode ??
+        p.employeeCode ??
+        `WF-${p.id.slice(0, 6).toUpperCase()}`,
+      profileId: p.id,
+      tasEmployeeCode: p.employeeCode ?? existing?.tasEmployeeCode ?? null,
+      firstName: mergedFirstName,
+      lastName: mergedLastName,
+      displayName: mergedDisplayName,
+      personalEmail: mergedPersonalEmail,
+      organizationEmail: mergedOrgEmail,
+      phoneNumber: mergedPhone,
+      address: mergedAddress,
+      joiningDate: mergedJoining,
+      lastWorkingDate: mergedLwd,
+      employmentStatus: statusInfo.employmentStatus,
+      statusNeedsReview: false,
+      statusSource: statusInfo.statusSource,
+      employmentCategory: cat !== "unknown" ? cat : (existing?.employmentCategory ?? "unknown"),
+      workType: wt !== "unknown" ? wt : (existing?.workType ?? "unknown"),
+      departmentId: mergedDeptId,
+      departmentName: mergedDeptName,
+      designation: mergedDesig,
+      reportingManagerId: p.reportingLeadId ?? existing?.reportingManagerId ?? null,
+      reportingManagerName: p.reportingLeadName ?? existing?.reportingManagerName ?? null,
+      legalEmployer: p.legalEmployer ?? existing?.legalEmployer ?? "Learning Paths Technologies LLP",
+      driveFolderUrl: existing?.driveFolderUrl ?? null,
+      driveFolderName: existing?.driveFolderName ?? null,
+      driveFolderId: existing?.driveFolderId ?? null,
+      driveMatchStatus: existing?.driveMatchStatus ?? "unmatched",
+      driveMatchedAt: existing?.driveMatchedAt ?? null,
+      hasDriveFolder: hasDrive,
+      documentSource: docSource,
+      documentAvailabilityStatus: docAvail,
+      kycSummary: kyc,
+      sourceType: existing?.sourceType ?? "workforce_sync",
+      sourceImportBatchId: existing?.sourceImportBatchId ?? null,
+      lastSyncedAt: existing?.lastSyncedAt ?? p.createdAt,
+      lastUpdatedBy: existing?.lastUpdatedBy ?? null,
+      recordCompleteness: comp.score,
+      missingFields: comp.missingFields,
+      matchConfidence: "exact",
+      duplicateReviewStatus: existing?.duplicateReviewStatus ?? "clear",
+      needsReview: existing?.needsReview ?? false,
+      reviewReasons: existing?.reviewReasons ?? [],
+      notes: existing?.notes ?? null,
+      rawSourceSnapshot: existing?.rawSourceSnapshot ?? null,
+      createdAt: existing?.createdAt ?? p.createdAt,
+      updatedAt: existing?.updatedAt ?? p.createdAt,
+    });
+  }
+
+  for (const r of args.records) {
+    if (!r.profileId) {
+      unified.push(r);
+    }
+  }
+
+  return unified;
+}
+
+/** Pure filtering, sorting, and pagination across unified Workforce + Historical Records. */
+export function filterAndSortUnifiedRecords(
+  records: readonly EmployeeRecordItem[],
+  filters: RecordsListFilters,
+): {
+  filtered: EmployeeRecordItem[];
+  pageItems: EmployeeRecordItem[];
+  total: number;
+  page: number;
+  pageSize: number;
+} {
+  const search = (filters.search ?? "").trim().toLowerCase();
+
+  const filtered = records.filter((r) => {
+    if (search) {
+      const hay = [
+        r.displayName,
+        r.tasEmployeeCode ?? "",
+        r.historicalRecordCode,
+        r.organizationEmail ?? "",
+        r.personalEmail ?? "",
+        r.departmentName ?? "",
+        r.designation ?? "",
+        r.phoneNumber ?? "",
+      ]
+        .join(" ")
+        .toLowerCase();
+      if (!hay.includes(search)) return false;
+    }
+
+    if (filters.employmentStatus && filters.employmentStatus !== "all") {
+      if (r.employmentStatus !== filters.employmentStatus) return false;
+    }
+    if (filters.workType && filters.workType !== "all") {
+      if (r.workType !== filters.workType) return false;
+    }
+    if (filters.employmentCategory && filters.employmentCategory !== "all") {
+      if (r.employmentCategory !== filters.employmentCategory) return false;
+    }
+    if (filters.departmentId && filters.departmentId !== "all") {
+      if (r.departmentId !== filters.departmentId) return false;
+    }
+    if (filters.joiningDateFrom && (!r.joiningDate || r.joiningDate < filters.joiningDateFrom)) {
+      return false;
+    }
+    if (filters.joiningDateTo && (!r.joiningDate || r.joiningDate > filters.joiningDateTo)) {
+      return false;
+    }
+    if (filters.lwdFrom && (!r.lastWorkingDate || r.lastWorkingDate < filters.lwdFrom)) {
+      return false;
+    }
+    if (filters.lwdTo && (!r.lastWorkingDate || r.lastWorkingDate > filters.lwdTo)) {
+      return false;
+    }
+    if (filters.workforceLink === "linked" && !r.profileId) return false;
+    if (filters.workforceLink === "historical_only" && r.profileId) return false;
+
+    if (filters.documentFilter === "has_drive") {
+      if (r.documentSource !== "HISTORICAL_GOOGLE_DRIVE" && r.documentSource !== "BOTH") return false;
+    } else if (filters.documentFilter === "has_kyc") {
+      if (r.documentSource !== "HRM_KYC" && r.documentSource !== "BOTH") return false;
+    } else if (filters.documentFilter === "has_both") {
+      if (r.documentSource !== "BOTH") return false;
+    } else if (filters.documentFilter === "missing_docs") {
+      if (r.documentSource !== "NONE") return false;
+    }
+
+    if (filters.missingFieldsOnly && r.recordCompleteness >= 100) return false;
+    if (filters.needsReviewOnly && !r.needsReview && !r.statusNeedsReview) return false;
+
+    return true;
+  });
+
+  const sortCol = filters.sortBy ?? "updated_at";
+  const sortAsc = filters.sortDir === "asc";
+
+  const sorted = [...filtered].sort((a, b) => {
+    let cmp = 0;
+    if (sortCol === "display_name") {
+      cmp = a.displayName.localeCompare(b.displayName);
+    } else if (sortCol === "joining_date") {
+      cmp = (a.joiningDate ?? "").localeCompare(b.joiningDate ?? "");
+    } else if (sortCol === "last_working_date") {
+      cmp = (a.lastWorkingDate ?? "").localeCompare(b.lastWorkingDate ?? "");
+    } else if (sortCol === "record_completeness") {
+      cmp = a.recordCompleteness - b.recordCompleteness;
+    } else {
+      cmp = (a.updatedAt ?? "").localeCompare(b.updatedAt ?? "");
+    }
+    return sortAsc ? cmp : -cmp;
+  });
+
+  const page = Math.max(1, Number(filters.page ?? 1));
+  const pageSize = Math.min(100, Math.max(10, Number(filters.pageSize ?? 25)));
+  const start = (page - 1) * pageSize;
+  return {
+    filtered: sorted,
+    pageItems: sorted.slice(start, start + pageSize),
+    total: sorted.length,
+    page,
+    pageSize,
+  };
 }

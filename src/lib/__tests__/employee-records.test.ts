@@ -17,10 +17,13 @@ import {
   CONSOLIDATED_EXCEL_HEADERS,
   classifyEmploymentStatus,
   detectSourceColumnMapping,
+  filterAndSortUnifiedRecords,
   matchDriveFolderLinks,
   matchImportRowsAgainstDirectory,
+  mergeWorkforceAndRecords,
   type DirectoryRecordEntry,
   type DirectoryWorkforceEntry,
+  type UnifiedWorkforceProfileInput,
 } from "../records/matcher";
 import {
   computeDocumentAvailability,
@@ -35,6 +38,10 @@ import { excludeProtectedAccounts } from "../work-type";
 const repoRoot = resolve(__dirname, "../../..");
 const migrationSql = readFileSync(
   resolve(repoRoot, "supabase/migrations/20261125120000_employee_records_master_register.sql"),
+  "utf8",
+);
+const hardeningMigrationSql = readFileSync(
+  resolve(repoRoot, "supabase/migrations/20261125150000_employee_records_unique_guards_and_backfill.sql"),
   "utf8",
 );
 
@@ -198,12 +205,16 @@ describe("Employee Records — 263-Row Consolidated Excel Fidelity, Matching & O
     );
 
     expect(res.rows.length).toBe(263);
-    // Outcome A: Row 1 linked to existing Workforce without duplication
-    expect(res.summary.matchedWorkforceCount).toBe(1);
+    // Outcome A: Row 1 matches existing Workforce (rejected as duplicate, never overwritten)
+    expect(res.summary.duplicateExistingCount).toBe(1);
+    expect(res.summary.duplicateCount).toBe(1);
+    expect(res.rows[0]!.category).toBe("duplicate_existing");
     expect(res.rows[0]!.matchedProfileId).toBe("wf-1");
     expect(res.rows[0]!.matchedTasCode).toBe("TAS-001");
-    // Outcome B: Remaining 262 are historical-only (unknown fields never invented)
+    expect(res.rows[0]!.readyToImport).toBe(false);
+    // Outcome B: Remaining 262 are genuinely new historical records
     expect(res.summary.newHistoricalCount).toBe(262);
+    expect(res.summary.readyToImportCount).toBe(262);
     expect(res.rows[10]!.employmentCategory).toBe("unknown");
     expect(res.rows[10]!.workType).toBe("unknown");
     expect(res.rows[10]!.lastName).toBe("Last11");
@@ -218,7 +229,7 @@ describe("Employee Records — 263-Row Consolidated Excel Fidelity, Matching & O
     expect(res.missingWorkforceProfiles.map((m) => m.profileId)).toEqual(["wf-only-1", "wf-ambig-1"]);
   });
 
-  it("never auto-merges on matching name alone or phone-only without email", () => {
+  it("requires manual review on name-only ambiguity and never rejects distinct employees sharing a phone", () => {
     const mapping = detectSourceColumnMapping([...CONSOLIDATED_EXCEL_HEADERS]);
     const res = matchImportRowsAgainstDirectory(
       [
@@ -232,62 +243,194 @@ describe("Employee Records — 263-Row Consolidated Excel Fidelity, Matching & O
           "TAS Mail": "",
         },
         {
-          "First Name": "Different Name",
-          "Last Name": "",
+          "First Name": "Different",
+          "Last Name": "Person",
           "Phone Number": "9111111111",
           DOJ: "2025-05-01",
-          LWD: "",
+          LWD: "2025-11-01",
           "E-Mail ID": "",
-          "TAS Mail": "",
+          "TAS Mail": "different.person@theaischool.co",
         },
       ],
       { workforce: workforceFixture, records: existingRecordsFixture, todayIso: "2026-11-25" },
       { mapping },
     );
 
-    // Row 1 matched by name only -> must require manual review & NOT ready to auto-merge
+    // Row 1 matched by name only -> requires manual review & NOT ready to import
     expect(res.rows[0]!.category).toBe("possible_duplicate");
     expect(res.rows[0]!.matchConfidence).toBe("needs_review");
     expect(res.rows[0]!.matchedProfileId).toBeNull();
     expect(res.rows[0]!.readyToImport).toBe(false);
 
-    // Row 2 matched by phone with different name -> must require manual review
-    expect(res.rows[1]!.category).toBe("possible_duplicate");
-    expect(res.rows[1]!.matchConfidence).toBe("needs_review");
-    expect(res.rows[1]!.matchedProfileId).toBeNull();
+    // Row 2 has distinct name & unique org email sharing phone only -> NOT falsely rejected as duplicate
+    expect(res.rows[1]!.category).toBe("new_historical");
+    expect(res.rows[1]!.readyToImport).toBe(true);
+    expect(res.rows[1]!.warnings.some((w) => w.includes("not rejected"))).toBe(true);
   });
 
-  it("detects intra-file duplicate emails and flags both rows for review", () => {
+  it("rejects intra-file duplicates while keeping first valid occurrence, and enforces mixed 20-row counts", () => {
     const mapping = detectSourceColumnMapping([...CONSOLIDATED_EXCEL_HEADERS]);
+
+    // 20 rows: 15 new + 3 existing Workforce + 2 repeated inside file
+    const rows: Record<string, string | number | null>[] = [];
+    // 3 duplicates against existing Workforce (Sreeja, Arjun, Kiran)
+    rows.push(
+      { "First Name": "Vattikonda", "Last Name": "Sreeja", "Phone Number": "", DOJ: "2025-02-01", LWD: "", "E-Mail ID": "", "TAS Mail": "sreeja@theaischool.co" },
+      { "First Name": "Arjun", "Last Name": "Nair", "Phone Number": "", DOJ: "2026-08-01", LWD: "", "E-Mail ID": "", "TAS Mail": "arjun.nair@theaischool.co" },
+      { "First Name": "Kiran", "Last Name": "Kumar", "Phone Number": "9111111111", DOJ: "2025-05-01", LWD: "", "E-Mail ID": "", "TAS Mail": "kiran.k1@theaischool.co" },
+    );
+    // 15 genuinely new employees
+    for (let i = 1; i <= 15; i += 1) {
+      rows.push({
+        "First Name": `NewEmp${i}`,
+        "Last Name": `Surname${i}`,
+        "Phone Number": `98220${String(10000 + i).slice(-5)}`,
+        DOJ: "2025-01-10",
+        LWD: "2025-09-30",
+        "E-Mail ID": `newemp${i}@gmail.com`,
+        "TAS Mail": `newemp${i}@theaischool.co`,
+      });
+    }
+    // 2 duplicates inside same file (repeating NewEmp1 by org email and NewEmp2 by personal email)
+    rows.push(
+      { "First Name": "NewEmp1", "Last Name": "Duplicate", "Phone Number": "", DOJ: "2025-01-10", LWD: "2025-09-30", "E-Mail ID": "", "TAS Mail": "NEWEMP1@theaischool.co" },
+      { "First Name": "NewEmp2", "Last Name": "Duplicate", "Phone Number": "", DOJ: "2025-01-10", LWD: "2025-09-30", "E-Mail ID": "NewEmp2@gmail.com", "TAS Mail": "" },
+    );
+
     const res = matchImportRowsAgainstDirectory(
-      [
-        {
-          "First Name": "Priya",
-          "Last Name": "A",
-          "Phone Number": "",
-          DOJ: "2025-01-10",
-          LWD: "2025-06-30",
-          "E-Mail ID": "dup@example.com",
-          "TAS Mail": "",
-        },
-        {
-          "First Name": "Priya",
-          "Last Name": "B",
-          "Phone Number": "",
-          DOJ: "2025-02-10",
-          LWD: "2025-06-30",
-          "E-Mail ID": "DUP@example.com",
-          "TAS Mail": "",
-        },
-      ],
-      { workforce: [], records: [], todayIso: "2026-11-25" },
+      rows,
+      { workforce: workforceFixture, records: existingRecordsFixture, todayIso: "2026-11-25" },
       { mapping },
     );
 
-    expect(res.rows[0]!.duplicateWithRowNumbers).toEqual([3]);
-    expect(res.rows[1]!.duplicateWithRowNumbers).toEqual([2]);
-    expect(res.rows[0]!.category).toBe("possible_duplicate");
-    expect(res.rows[1]!.category).toBe("possible_duplicate");
+    expect(res.summary.totalRows).toBe(20);
+    expect(res.summary.readyToImportCount).toBe(15);
+    expect(res.summary.newHistoricalCount).toBe(15);
+    expect(res.summary.duplicateExistingCount).toBe(3);
+    expect(res.summary.duplicateInFileCount).toBe(2);
+    expect(res.summary.duplicateCount).toBe(5);
+    expect(res.rows[18]!.category).toBe("duplicate_in_file");
+    expect(res.rows[18]!.readyToImport).toBe(false);
+    expect(res.rows[19]!.category).toBe("duplicate_in_file");
+    expect(res.rows[19]!.readyToImport).toBe(false);
+  });
+
+  it("unifies existing Workforce employees with employee_records without duplication and supports search/status filter", () => {
+    const workforce: UnifiedWorkforceProfileInput[] = [
+      {
+        id: "p-active",
+        employeeCode: "TAS-002",
+        fullName: "Arjun Verma",
+        workEmail: "arjun@theaischool.co",
+        personalEmail: "arjun@gmail.com",
+        mobile: "9876500001",
+        address: null,
+        joiningDate: "2024-06-01",
+        lastWorkingDay: null,
+        employmentStatus: "active",
+        category: "full_time",
+        workType: "engineering",
+        departmentId: "dept-1",
+        departmentName: "Engineering",
+        designation: "Software Engineer",
+        reportingLeadId: null,
+        reportingLeadName: null,
+        hasRelievedCase: false,
+        relievingEffectiveDate: null,
+        legalEmployer: null,
+        createdAt: "2024-06-01T00:00:00Z",
+      },
+      {
+        id: "p-relieved",
+        employeeCode: "TAS-003",
+        fullName: "Chanti Macharla",
+        workEmail: "chanti@theaischool.co",
+        personalEmail: null,
+        mobile: null,
+        address: null,
+        joiningDate: "2025-07-02",
+        lastWorkingDay: "2025-10-30",
+        employmentStatus: "inactive",
+        category: "intern",
+        workType: "annotation",
+        departmentId: "dept-2",
+        departmentName: "Annotation",
+        designation: "AI Data Intern",
+        reportingLeadId: null,
+        reportingLeadName: null,
+        hasRelievedCase: true,
+        relievingEffectiveDate: "2025-10-30",
+        legalEmployer: "Learning Paths Technologies LLP",
+        createdAt: "2025-07-02T00:00:00Z",
+      },
+    ];
+
+    const storedRecordForChanti: EmployeeRecordItem = {
+      id: "rec-chanti",
+      historicalRecordCode: "TAS-REC-0001",
+      profileId: "p-relieved",
+      tasEmployeeCode: "TAS-003",
+      firstName: "Chanti",
+      lastName: "Macharla",
+      displayName: "Chanti Macharla",
+      personalEmail: null,
+      organizationEmail: "chanti@theaischool.co",
+      phoneNumber: null,
+      address: null,
+      joiningDate: "2025-07-02",
+      lastWorkingDate: "2025-10-30",
+      employmentStatus: "inactive",
+      statusNeedsReview: false,
+      statusSource: "relieving_record",
+      employmentCategory: "intern",
+      workType: "annotation",
+      departmentId: "dept-2",
+      departmentName: "Annotation",
+      designation: "AI Data Intern",
+      reportingManagerId: null,
+      reportingManagerName: null,
+      legalEmployer: "Learning Paths Technologies LLP",
+      driveFolderUrl: null,
+      driveFolderName: null,
+      driveFolderId: null,
+      driveMatchStatus: "unmatched",
+      driveMatchedAt: null,
+      hasDriveFolder: false,
+      kycSummary: null,
+      documentSource: "NONE",
+      documentAvailabilityStatus: "missing",
+      sourceType: "workforce_sync",
+      sourceImportBatchId: null,
+      lastSyncedAt: "2026-11-25T00:00:00Z",
+      lastUpdatedBy: null,
+      recordCompleteness: 80,
+      missingFields: [],
+      matchConfidence: "exact",
+      duplicateReviewStatus: "clear",
+      needsReview: false,
+      reviewReasons: [],
+      notes: null,
+      createdAt: "2026-11-25T00:00:00Z",
+      updatedAt: "2026-11-25T00:00:00Z",
+    };
+
+    const merged = mergeWorkforceAndRecords({
+      workforce,
+      records: [storedRecordForChanti],
+      kycSummaries: new Map(),
+      todayIso: "2026-11-25",
+    });
+
+    // Exactly 2 unified records: Arjun synthesized as wf:p-active, Chanti uses rec-chanti (zero duplication)
+    expect(merged.length).toBe(2);
+    expect(merged.find((r) => r.profileId === "p-active")?.id).toBe("wf:p-active");
+    expect(merged.find((r) => r.profileId === "p-relieved")?.id).toBe("rec-chanti");
+
+    const activeOnly = filterAndSortUnifiedRecords(merged, { employmentStatus: "active" });
+    expect(activeOnly.filtered.map((r) => r.displayName)).toEqual(["Arjun Verma"]);
+
+    const searchByDept = filterAndSortUnifiedRecords(merged, { search: "Annotation" });
+    expect(searchByDept.filtered.map((r) => r.displayName)).toEqual(["Chanti Macharla"]);
   });
 
   it("completes 500-row parse, match, and classification well within performance budget", () => {
@@ -535,5 +678,11 @@ describe("Employee Records — RBAC, Founder Redaction, Navigation & SQL Integri
     expect(migrationSql).toContain("('founder'::public.app_role, 'records:read:all')");
     expect(migrationSql).not.toContain("('founder'::public.app_role, 'records:manage:all')");
     expect(migrationSql).not.toContain("('founder'::public.app_role, 'records:documents:read')");
+
+    // Hardening & backfill migration checks
+    expect(hardeningMigrationSql).toContain("uq_employee_records_tas_code");
+    expect(hardeningMigrationSql).toContain("uq_employee_records_org_email");
+    expect(hardeningMigrationSql).toContain("'duplicate'");
+    expect(hardeningMigrationSql).toContain("sync_all_workforce_to_employee_records");
   });
 });

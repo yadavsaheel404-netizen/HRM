@@ -310,8 +310,10 @@ export type ImportCandidateMatch = {
 };
 
 export type ImportRowCategory =
-  | "matched_workforce"
   | "new_historical"
+  | "duplicate_existing"
+  | "duplicate_in_file"
+  | "matched_workforce"
   | "existing_historical"
   | "possible_duplicate"
   | "needs_information"
@@ -353,11 +355,32 @@ export type ImportPreviewRow = {
   matchedTasCode: string | null;
   candidates: ImportCandidateMatch[];
   duplicateWithRowNumbers: number[];
+  duplicateReason?: string | null | undefined;
   missingFields: string[];
   warnings: string[];
   errors: string[];
   excluded: boolean;
   readyToImport: boolean;
+};
+
+export type ImportCommitRowResult = {
+  rowNumber: number;
+  displayName: string;
+  tasEmployeeCode: string | null;
+  status: "imported" | "duplicate" | "invalid" | "failed";
+  reason: string;
+};
+
+export type ImportCommitSummary = {
+  replayed: boolean;
+  batchId: string;
+  batchKey: string;
+  totalRows: number;
+  importedCount: number;
+  duplicateCount: number;
+  invalidCount: number;
+  failedCount: number;
+  rowResults: ImportCommitRowResult[];
 };
 
 export type MissingWorkforceEntry = {
@@ -379,6 +402,9 @@ export type ImportPreviewSummary = {
   newHistoricalCount: number;
   existingHistoricalCount: number;
   missingWorkforceCount: number;
+  duplicateExistingCount: number;
+  duplicateInFileCount: number;
+  duplicateCount: number;
   possibleDuplicatesCount: number;
   needsInformationCount: number;
   invalidCount: number;

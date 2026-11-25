@@ -22,8 +22,10 @@ import { loadProtectedAccountIds } from "./work-type.server";
 import {
   buildDisplayName,
   classifyEmploymentStatus,
+  filterAndSortUnifiedRecords,
   matchDriveFolderLinks,
   matchImportRowsAgainstDirectory,
+  mergeWorkforceAndRecords,
   normalizeCategoryInput,
   normalizeEmail,
   normalizeName,
@@ -32,6 +34,7 @@ import {
   splitDisplayName,
   type DirectoryRecordEntry,
   type DirectoryWorkforceEntry,
+  type UnifiedWorkforceProfileInput,
 } from "./records/matcher";
 import {
   computeDocumentAvailability,
@@ -44,6 +47,8 @@ import {
   type EmployeeRecordDetail,
   type EmployeeRecordItem,
   type EmploymentHistoryPeriod,
+  type ImportCommitRowResult,
+  type ImportCommitSummary,
   type ImportPreviewRow,
   type KycSummarySnapshot,
   type ListEmployeeRecordsResponse,
@@ -245,9 +250,111 @@ function applyRecordFiltersToQuery(query: any, filters: RecordsListFilters) {
   return q;
 }
 
+async function loadUnifiedDataset(supabase: any): Promise<{
+  schemaReady: boolean;
+  unified: EmployeeRecordItem[];
+  departments: { id: string; name: string }[];
+}> {
+  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+  const { loadKycSummaryMap } = await import("./records/sync.server");
+  const db = looseDb(supabaseAdmin);
+  const protectedIds = await loadProtectedAccountIds(supabase);
+
+  const [profilesRes, deptsRes, relievedRes, recsRes] = await Promise.all([
+    db
+      .from("profiles")
+      .select(
+        "id, employee_code, full_name, work_email, personal_email, mobile, current_address, permanent_address, joining_date, last_working_day, employment_status, category, work_type, department_id, designation, reporting_lead_id, created_at",
+      )
+      .order("full_name"),
+    supabaseAdmin.from("departments").select("id, name").order("name"),
+    db
+      .from("relieving_cases")
+      .select("user_id, status, relieving_effective_date, last_working_day, legal_employer")
+      .eq("status", "relieved"),
+    db.from("employee_records").select("*").order("updated_at", { ascending: false }),
+  ]);
+
+  if (profilesRes.error) rethrowDbError("Loading Workforce directory failed", profilesRes.error);
+
+  const schemaReady = !(recsRes.error && isMissingSchemaResourceError(recsRes.error));
+  if (recsRes.error && !isMissingSchemaResourceError(recsRes.error)) {
+    rethrowDbError("Loading Employee Records failed", recsRes.error);
+  }
+
+  const deptList = (deptsRes.data ?? []).map((d) => ({ id: d.id, name: d.name }));
+  const deptMap = new Map(deptList.map((d) => [d.id, d.name]));
+  const nameById = new Map<string, string>();
+  for (const p of (profilesRes.data ?? []) as any[]) {
+    if (p.id && p.full_name) nameById.set(p.id, p.full_name);
+  }
+
+  const relievedMap = new Map<
+    string,
+    { relievingEffectiveDate: string | null; legalEmployer: string | null }
+  >();
+  if (!relievedRes.error) {
+    for (const r of (relievedRes.data ?? []) as any[]) {
+      if (r.user_id && !relievedMap.has(r.user_id)) {
+        relievedMap.set(r.user_id, {
+          relievingEffectiveDate: r.relieving_effective_date ?? r.last_working_day ?? null,
+          legalEmployer: r.legal_employer ?? null,
+        });
+      }
+    }
+  }
+
+  const nonProtectedProfiles = ((profilesRes.data ?? []) as any[]).filter(
+    (p) => !protectedIds.has(p.id),
+  );
+  const kycSummaries = await loadKycSummaryMap(nonProtectedProfiles.map((p) => p.id));
+
+  const workforceInputs: UnifiedWorkforceProfileInput[] = nonProtectedProfiles.map((p) => {
+    const rel = relievedMap.get(p.id);
+    return {
+      id: p.id,
+      employeeCode: p.employee_code ?? null,
+      fullName: p.full_name ?? p.work_email ?? "Employee",
+      workEmail: p.work_email ?? "",
+      personalEmail: p.personal_email ?? null,
+      mobile: p.mobile ?? null,
+      address: p.current_address || p.permanent_address || null,
+      joiningDate: p.joining_date ?? null,
+      lastWorkingDay: p.last_working_day ?? null,
+      employmentStatus: p.employment_status ?? "active",
+      category: p.category ?? "full_time",
+      workType: p.work_type ?? null,
+      departmentId: p.department_id ?? null,
+      departmentName: p.department_id ? (deptMap.get(p.department_id) ?? null) : null,
+      designation: p.designation ?? null,
+      reportingLeadId: p.reporting_lead_id ?? null,
+      reportingLeadName: p.reporting_lead_id ? (nameById.get(p.reporting_lead_id) ?? null) : null,
+      hasRelievedCase: Boolean(rel),
+      relievingEffectiveDate: rel?.relievingEffectiveDate ?? null,
+      legalEmployer: rel?.legalEmployer ?? null,
+      createdAt: p.created_at,
+    };
+  });
+
+  const existingRecords: EmployeeRecordItem[] = schemaReady
+    ? ((recsRes.data ?? []) as any[])
+        .filter((r) => !r.profile_id || !protectedIds.has(r.profile_id))
+        .map(mapRecordRow)
+    : [];
+
+  const unified = mergeWorkforceAndRecords({
+    workforce: workforceInputs,
+    records: existingRecords,
+    kycSummaries,
+    todayIso: todayIso(),
+  });
+
+  return { schemaReady, unified, departments: deptList };
+}
+
 /**
- * Lists master Employee Records with server-side filtering, search, pagination,
- * live KPI aggregates, and strict Founder redaction.
+ * Lists unified Workforce + Historical Employee Records with server-side filtering,
+ * search, pagination, live KPI aggregates, and strict Founder redaction.
  */
 export const listEmployeeRecords = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
@@ -258,96 +365,40 @@ export const listEmployeeRecords = createServerFn({ method: "POST" })
     const canViewConfidential = canViewRecordConfidentialFields(actor.roles, actor.permissions);
     const canExport = canExportEmployeeRecords(actor.roles, actor.permissions);
 
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const db = looseDb(supabaseAdmin);
-    const protectedIds = await loadProtectedAccountIds(context.supabase);
-
-    const page = Math.max(1, Number(data.page ?? 1));
-    const pageSize = Math.min(100, Math.max(10, Number(data.pageSize ?? 25)));
-    const fromIdx = (page - 1) * pageSize;
-    const toIdx = fromIdx + pageSize - 1;
-
-    const sortCol = data.sortBy ?? "updated_at";
-    const sortAsc = data.sortDir === "asc";
-
-    // Select safe columns only for confidential-restricted viewers (never even pull drive_folder_url for Founder)
-    const selectCols = canViewConfidential
-      ? "*"
-      : "id, historical_record_code, profile_id, tas_employee_code, first_name, last_name, display_name, organization_email, joining_date, last_working_date, employment_status, status_needs_review, status_source, employment_category, work_type, department_id, department_name, designation, reporting_manager_id, reporting_manager_name, legal_employer, drive_match_status, drive_matched_at, document_source, document_availability_status, kyc_summary, source_type, source_import_batch_id, last_synced_at, last_updated_by, record_completeness, missing_fields, match_confidence, duplicate_review_status, needs_review, review_reasons, notes, created_at, updated_at";
-
-    let listQuery = applyRecordFiltersToQuery(
-      db.from("employee_records").select(selectCols, { count: "exact" }),
-      data,
-    )
-      .order(sortCol, { ascending: sortAsc, nullsFirst: false })
-      .range(fromIdx, toIdx);
-
-    if (protectedIds.size > 0) {
-      const excluded = `(${[...protectedIds].join(",")})`;
-      listQuery = listQuery.or(`profile_id.is.null,profile_id.not.in.${excluded}`);
-    }
-
-    const [listRes, kpiRes, deptRes] = await Promise.all([
-      listQuery,
-      db
-        .from("employee_records")
-        .select(
-          "id, profile_id, employment_status, record_completeness, document_source, needs_review, status_needs_review, last_synced_at",
-        ),
-      context.supabase.from("departments").select("id, name").order("name"),
-    ]);
-
-    if (listRes.error) {
-      if (isMissingSchemaResourceError(listRes.error)) {
-        return emptyListResponse(canManage, canViewConfidential, canExport);
-      }
-      rethrowDbError("Loading Employee Records failed", listRes.error);
-    }
-
-    const kpiRows = ((kpiRes.data ?? []) as any[]).filter(
-      (r) => !r.profile_id || !protectedIds.has(r.profile_id),
-    );
+    const { schemaReady, unified, departments } = await loadUnifiedDataset(context.supabase);
 
     let lastSyncedAt: string | null = null;
-    for (const r of kpiRows) {
-      if (r.last_synced_at && (!lastSyncedAt || r.last_synced_at > lastSyncedAt)) {
-        lastSyncedAt = r.last_synced_at;
+    for (const r of unified) {
+      if (r.lastSyncedAt && (!lastSyncedAt || r.lastSyncedAt > lastSyncedAt)) {
+        lastSyncedAt = r.lastSyncedAt;
       }
     }
 
     const kpis: RecordsKpiStats = {
-      totalRecords: kpiRows.length,
-      activeCount: kpiRows.filter((r) => r.employment_status === "active").length,
-      inactiveCount: kpiRows.filter((r) => r.employment_status === "inactive").length,
-      missingInfoCount: kpiRows.filter((r) => Number(r.record_completeness ?? 0) < 100).length,
-      linkedWorkforceCount: kpiRows.filter((r) => Boolean(r.profile_id)).length,
-      historicalDocsAvailableCount: kpiRows.filter(
-        (r) => r.document_source === "HISTORICAL_GOOGLE_DRIVE" || r.document_source === "BOTH",
+      totalRecords: unified.length,
+      activeCount: unified.filter((r) => r.employmentStatus === "active").length,
+      inactiveCount: unified.filter((r) => r.employmentStatus === "inactive").length,
+      missingInfoCount: unified.filter((r) => r.recordCompleteness < 100).length,
+      linkedWorkforceCount: unified.filter((r) => Boolean(r.profileId)).length,
+      historicalDocsAvailableCount: unified.filter(
+        (r) => r.documentSource === "HISTORICAL_GOOGLE_DRIVE" || r.documentSource === "BOTH",
       ).length,
-      needsReviewCount: kpiRows.filter((r) => r.needs_review || r.status_needs_review).length,
+      needsReviewCount: unified.filter((r) => r.needsReview || r.statusNeedsReview).length,
       lastSyncedAt,
     };
 
-    // If Founder is querying by personal email/phone in raw search, those columns are stripped anyway;
-    // ensure every returned row passes redactRecordForViewer.
-    const rows = ((listRes.data ?? []) as any[]).map((raw) => {
-      const mapped = mapRecordRow(raw);
-      if (kpiRows.length > 0 && !canViewConfidential) {
-        // Compute hasDriveFolder reliably from document_source when drive_folder_url wasn't selected
-        mapped.hasDriveFolder =
-          mapped.documentSource === "HISTORICAL_GOOGLE_DRIVE" || mapped.documentSource === "BOTH";
-      }
-      return redactRecordForViewer(mapped, canViewConfidential);
-    });
+    // For confidential-restricted viewers (Founder), filter on redacted records so search cannot probe hidden PII
+    const viewerSafePool = unified.map((r) => redactRecordForViewer(r, canViewConfidential));
+    const { pageItems, total, page, pageSize } = filterAndSortUnifiedRecords(viewerSafePool, data);
 
     return {
-      schemaReady: true,
-      records: rows,
-      total: Number(listRes.count ?? rows.length),
+      schemaReady,
+      records: pageItems,
+      total,
       page,
       pageSize,
       kpis,
-      departments: (deptRes.data ?? []).map((d) => ({ id: d.id, name: d.name })),
+      departments,
       canManage,
       canViewConfidential,
       canExport,
@@ -373,23 +424,110 @@ export const getEmployeeRecordDetail = createServerFn({ method: "GET" })
     const db = looseDb(supabaseAdmin);
     const protectedIds = await loadProtectedAccountIds(context.supabase);
 
-    const { data: recRow, error: recErr } = await db
-      .from("employee_records")
-      .select("*")
-      .eq("id", data.recordId)
-      .maybeSingle();
+    let recRow: any = null;
+    if (data.recordId.startsWith("wf:")) {
+      const wfProfileId = data.recordId.slice(3);
+      if (protectedIds.has(wfProfileId)) throw new Error("Employee record not found.");
+      // Check if an employee_records row was synced in the meantime
+      const { data: linked } = await db
+        .from("employee_records")
+        .select("*")
+        .eq("profile_id", wfProfileId)
+        .maybeSingle();
+      if (linked) {
+        recRow = linked;
+      } else {
+        const { unified } = await loadUnifiedDataset(context.supabase);
+        const match = unified.find((u) => u.profileId === wfProfileId);
+        if (!match) throw new Error("Employee record not found.");
+        const [wfRes, docsRes] = await Promise.all([
+          db
+            .from("profiles")
+            .select(
+              "id, full_name, work_email, employee_code, account_status, employment_status, category, work_type, designation, department_id, joining_date, last_working_day",
+            )
+            .eq("id", wfProfileId)
+            .maybeSingle(),
+          canViewConfidential
+            ? supabaseAdmin
+                .from("documents")
+                .select("id, doc_type, status, file_name, reviewed_at")
+                .eq("user_id", wfProfileId)
+                .order("doc_type")
+            : Promise.resolve({ data: [] as any[] }),
+        ]);
+        return {
+          record: redactRecordForViewer(match, canViewConfidential),
+          employmentHistory: [
+            {
+              id: `wf-hist:${wfProfileId}`,
+              recordId: match.id,
+              startDate: match.joiningDate,
+              endDate: match.lastWorkingDate,
+              designation: match.designation,
+              employmentCategory: match.employmentCategory,
+              workType: match.workType,
+              departmentId: match.departmentId,
+              departmentName: match.departmentName,
+              reportingManagerName: match.reportingManagerName,
+              legalEmployer: match.legalEmployer,
+              status: match.employmentStatus === "active" ? "active" : "inactive",
+              source: "workforce_sync",
+              isCurrent: true,
+              notes: null,
+              createdAt: match.createdAt,
+            },
+          ],
+          workforceProfile: wfRes.data
+            ? {
+                id: wfRes.data.id,
+                fullName: wfRes.data.full_name,
+                workEmail: wfRes.data.work_email,
+                employeeCode: wfRes.data.employee_code ?? null,
+                accountStatus: wfRes.data.account_status,
+                employmentStatus: wfRes.data.employment_status,
+                category: wfRes.data.category,
+                workType: wfRes.data.work_type ?? null,
+                designation: wfRes.data.designation ?? null,
+                departmentName: match.departmentName,
+                joiningDate: wfRes.data.joining_date ?? null,
+                lastWorkingDay: wfRes.data.last_working_day ?? null,
+              }
+            : null,
+          kycDocuments: ((docsRes.data ?? []) as any[]).map((d) => ({
+            id: d.id,
+            docType: d.doc_type,
+            status: d.status,
+            fileName: d.file_name,
+            reviewedAt: d.reviewed_at ?? null,
+          })),
+          auditHistory: [],
+          canViewConfidential,
+          canManage,
+        };
+      }
+    } else {
+      const { data: loadedRow, error: recErr } = await db
+        .from("employee_records")
+        .select("*")
+        .eq("id", data.recordId)
+        .maybeSingle();
 
-    if (recErr) rethrowDbError("Loading record details failed", recErr);
-    if (!recRow) throw new Error("Employee record not found.");
-    if (recRow.profile_id && protectedIds.has(recRow.profile_id)) {
-      throw new Error("Employee record not found.");
+      if (recErr) rethrowDbError("Loading record details failed", recErr);
+      if (!loadedRow) throw new Error("Employee record not found.");
+      if (loadedRow.profile_id && protectedIds.has(loadedRow.profile_id)) {
+        throw new Error("Employee record not found.");
+      }
+      recRow = loadedRow;
     }
+
+    const actualRecordId = recRow.id as string;
 
     const [histRes, auditRes, wfRes, docsRes] = await Promise.all([
       db
         .from("employee_employment_history")
         .select("*")
-        .eq("record_id", data.recordId)
+        .eq("record_id", actualRecordId)
         .order("is_current", { ascending: false })
         .order("start_date", { ascending: false, nullsFirst: false })
         .order("created_at", { ascending: false }),
@@ -398,7 +536,7 @@ export const getEmployeeRecordDetail = createServerFn({ method: "GET" })
             .from("audit_logs")
             .select("id, action, actor_email, detail, created_at")
             .eq("entity_type", "employee_record")
-            .eq("entity_id", data.recordId)
+            .eq("entity_id", actualRecordId)
             .order("created_at", { ascending: false })
             .limit(40)
         : Promise.resolve({ data: [] as any[] }),
@@ -639,6 +777,29 @@ export const createEmployeeRecord = createServerFn({ method: "POST" })
       documentSource: docSource,
     });
 
+    const normalizedOrgEmail = normalizeEmail(data.organizationEmail);
+    if (normalizedOrgEmail) {
+      const [{ data: wfHit }, { data: recHit }] = await Promise.all([
+        db
+          .from("profiles")
+          .select("id, full_name, employee_code")
+          .ilike("work_email", normalizedOrgEmail)
+          .limit(1)
+          .maybeSingle(),
+        db
+          .from("employee_records")
+          .select("id, display_name, historical_record_code")
+          .ilike("organization_email", normalizedOrgEmail)
+          .limit(1)
+          .maybeSingle(),
+      ]);
+      if (wfHit || recHit) {
+        throw new Error(
+          `An employee with organization email ${normalizedOrgEmail} already exists in Workforce or Employee Records.`,
+        );
+      }
+    }
+
     const { data: inserted, error } = await db
       .from("employee_records")
       .insert({
@@ -745,10 +906,20 @@ export const updateEmployeeRecord = createServerFn({ method: "POST" })
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const db = looseDb(supabaseAdmin);
 
+    // If editing an unsynced Workforce row ("wf:<profileId>"), materialize its 1-to-1 linked record first
+    let targetRecordId = data.recordId;
+    if (targetRecordId.startsWith("wf:")) {
+      const wfProfileId = targetRecordId.slice(3);
+      const { syncProfileToEmployeeRecordSafe } = await import("./records/sync.server");
+      const syncedId = await syncProfileToEmployeeRecordSafe(wfProfileId, context.userId);
+      if (!syncedId) throw new Error("Failed to link Workforce profile into Employee Records.");
+      targetRecordId = syncedId;
+    }
+
     const { data: existing, error: fetchErr } = await db
       .from("employee_records")
       .select("*")
-      .eq("id", data.recordId)
+      .eq("id", targetRecordId)
       .maybeSingle();
     if (fetchErr) rethrowDbError("Loading record for edit failed", fetchErr);
     if (!existing) throw new Error("Employee record not found.");
@@ -894,14 +1065,14 @@ export const updateEmployeeRecord = createServerFn({ method: "POST" })
     const { error: updErr } = await db
       .from("employee_records")
       .update(patch)
-      .eq("id", data.recordId);
+      .eq("id", targetRecordId);
     if (updErr) rethrowDbError("Updating Employee Record failed", updErr);
 
     await writeAudit(supabaseAdmin, {
       actorId: context.userId,
       action: "employee_record.updated",
       entityType: "employee_record",
-      entityId: data.recordId,
+      entityId: targetRecordId,
       detail: {
         updatedKeys: Object.keys(data).filter((k) => k !== "recordId"),
       },
@@ -935,16 +1106,25 @@ export const addEmploymentHistoryPeriod = createServerFn({ method: "POST" })
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const db = looseDb(supabaseAdmin);
 
+    let targetRecordId = data.recordId;
+    if (targetRecordId.startsWith("wf:")) {
+      const wfProfileId = targetRecordId.slice(3);
+      const { syncProfileToEmployeeRecordSafe } = await import("./records/sync.server");
+      const syncedId = await syncProfileToEmployeeRecordSafe(wfProfileId, context.userId);
+      if (!syncedId) throw new Error("Failed to link Workforce profile into Employee Records.");
+      targetRecordId = syncedId;
+    }
+
     if (data.isCurrent) {
       await db
         .from("employee_employment_history")
         .update({ is_current: false })
-        .eq("record_id", data.recordId)
+        .eq("record_id", targetRecordId)
         .eq("is_current", true);
     }
 
     const { error } = await db.from("employee_employment_history").insert({
-      record_id: data.recordId,
+      record_id: targetRecordId,
       start_date: data.startDate || null,
       end_date: data.endDate || null,
       designation: data.designation?.trim() || null,
@@ -965,7 +1145,7 @@ export const addEmploymentHistoryPeriod = createServerFn({ method: "POST" })
       actorId: context.userId,
       action: "employee_record.history_added",
       entityType: "employee_record",
-      entityId: data.recordId,
+      entityId: targetRecordId,
       detail: {
         designation: data.designation ?? null,
         startDate: data.startDate ?? null,
@@ -1241,20 +1421,66 @@ export const commitEmployeeRecordsImport = createServerFn({ method: "POST" })
         replayed: true,
         batchId: existingBatch.id,
         batchKey: existingBatch.batch_key,
-        matchedWorkforceCount: existingBatch.matched_workforce_count,
-        newHistoricalCount: existingBatch.new_historical_count,
-        updatedCount: existingBatch.updated_count,
-        skippedCount: existingBatch.skipped_count,
-        needsReviewCount: existingBatch.needs_review_count,
-        errorCount: existingBatch.error_count,
-        workforceSyncedCount: Number(existingBatch.summary?.workforceSyncedCount ?? 0),
-      };
+        totalRows: existingBatch.total_rows ?? data.rows.length,
+        importedCount: Number(existingBatch.summary?.importedCount ?? existingBatch.new_historical_count ?? 0),
+        duplicateCount: Number(existingBatch.summary?.duplicateCount ?? existingBatch.skipped_count ?? 0),
+        invalidCount: Number(existingBatch.summary?.invalidCount ?? existingBatch.needs_review_count ?? 0),
+        failedCount: Number(existingBatch.summary?.failedCount ?? existingBatch.error_count ?? 0),
+        rowResults: Array.isArray(existingBatch.summary?.rowResults)
+          ? (existingBatch.summary.rowResults as ImportCommitRowResult[])
+          : [],
+      } satisfies ImportCommitSummary;
     }
 
-    const { data: deptRows } = await supabaseAdmin.from("departments").select("id, name");
+    const [{ data: deptRows }, directory] = await Promise.all([
+      supabaseAdmin.from("departments").select("id, name"),
+      loadMatchingDirectory(context.supabase),
+    ]);
     const deptByName = new Map(
       (deptRows ?? []).map((d) => [d.name.trim().toLowerCase(), { id: d.id, name: d.name }]),
     );
+
+    // Live Workforce + Employee Records duplicate guard sets (never overwrite existing employees)
+    const dbTasCodes = new Set<string>();
+    const dbOrgEmails = new Set<string>();
+    const dbPersonalEmails = new Map<string, { normName: string; tasCode: string | null }[]>();
+    const dbPhoneNames = new Set<string>();
+
+    for (const w of directory.workforce) {
+      if (w.employeeCode) dbTasCodes.add(w.employeeCode.trim().toUpperCase());
+      const workEm = normalizeEmail(w.workEmail);
+      if (workEm) dbOrgEmails.add(workEm);
+      const persEm = normalizeEmail(w.personalEmail);
+      const wName = normalizeName(w.fullName);
+      if (persEm) {
+        const list = dbPersonalEmails.get(persEm) ?? [];
+        list.push({ normName: wName, tasCode: w.employeeCode ? w.employeeCode.trim().toUpperCase() : null });
+        dbPersonalEmails.set(persEm, list);
+      }
+      const wPhone = normalizePhone(w.mobile);
+      if (wPhone && wName) dbPhoneNames.add(`${wPhone}|${wName}`);
+    }
+
+    for (const r of directory.records) {
+      if (r.tasEmployeeCode) dbTasCodes.add(r.tasEmployeeCode.trim().toUpperCase());
+      dbTasCodes.add(r.historicalRecordCode.trim().toUpperCase());
+      const orgEm = normalizeEmail(r.organizationEmail);
+      if (orgEm) dbOrgEmails.add(orgEm);
+      const persEm = normalizeEmail(r.personalEmail);
+      const rName = normalizeName(r.displayName);
+      if (persEm) {
+        const list = dbPersonalEmails.get(persEm) ?? [];
+        list.push({ normName: rName, tasCode: r.tasEmployeeCode ? r.tasEmployeeCode.trim().toUpperCase() : null });
+        dbPersonalEmails.set(persEm, list);
+      }
+      const rPhone = normalizePhone(r.phoneNumber);
+      if (rPhone && rName) dbPhoneNames.add(`${rPhone}|${rName}`);
+    }
+
+    const seenBatchTasCodes = new Set<string>();
+    const seenBatchOrgEmails = new Set<string>();
+    const seenBatchPersonalEmails = new Map<string, { rowNumber: number; normName: string; tasCode: string | null }>();
+    const seenBatchPhoneNames = new Set<string>();
 
     const { data: batchRow, error: batchCreateErr } = await db
       .from("employee_record_import_batches")
@@ -1273,43 +1499,117 @@ export const commitEmployeeRecordsImport = createServerFn({ method: "POST" })
     if (batchCreateErr) rethrowDbError("Creating import batch failed", batchCreateErr);
     const batchId = batchRow.id as string;
 
-    let matchedWorkforceCount = 0;
-    let newHistoricalCount = 0;
-    let updatedCount = 0;
-    let skippedCount = 0;
-    let needsReviewCount = 0;
-    let errorCount = 0;
+    let importedCount = 0;
+    let duplicateCount = 0;
+    let invalidCount = 0;
+    let failedCount = 0;
 
     const auditRows: any[] = [];
-    const { syncProfileToEmployeeRecordSafe } = await import("./records/sync.server");
+    const rowResults: ImportCommitRowResult[] = [];
 
     for (const row of data.rows) {
-      if (row.excluded) {
-        skippedCount += 1;
+      const tasCode = row.matchedTasCode ? row.matchedTasCode.trim().toUpperCase() : null;
+      const orgEmail = normalizeEmail(row.organizationEmail);
+      const persEmail = normalizeEmail(row.personalEmail);
+      const normPhone = normalizePhone(row.phoneNumber);
+      const normName = normalizeName(row.displayName);
+
+      // 1. Check strict duplicate signals FIRST (existing Workforce/Records OR intra-file repeat)
+      let dupReason: string | null = row.duplicateReason ?? null;
+
+      if (
+        row.category === "duplicate_existing" ||
+        row.category === "duplicate_in_file" ||
+        row.category === "matched_workforce" ||
+        row.category === "existing_historical" ||
+        Boolean(row.matchedProfileId) ||
+        Boolean(row.matchedRecordId)
+      ) {
+        dupReason =
+          dupReason ||
+          (row.matchedProfileId
+            ? `Matches existing Workforce employee${tasCode ? ` (${tasCode})` : ""}. Existing records are never overwritten.`
+            : "Duplicate employee record rejected.");
+      } else if (row.errors.length === 0 && !row.excluded) {
+        if (tasCode && dbTasCodes.has(tasCode)) {
+          dupReason = `Employee ID ${tasCode} already exists in Workforce or Employee Records.`;
+        } else if (orgEmail && dbOrgEmails.has(orgEmail)) {
+          dupReason = `Organization email ${orgEmail} already exists in Workforce or Employee Records.`;
+        } else if (persEmail && dbPersonalEmails.has(persEmail)) {
+          const hits = dbPersonalEmails.get(persEmail)!;
+          const hit = hits.find((h) => {
+            const distinctId = Boolean(tasCode && h.tasCode && tasCode !== h.tasCode);
+            return !distinctId && (h.normName === normName || !tasCode || !orgEmail);
+          });
+          if (hit) {
+            dupReason = `Personal email ${persEmail} matches an existing employee in Workforce or Employee Records.`;
+          }
+        } else if (normPhone && normName && dbPhoneNames.has(`${normPhone}|${normName}`)) {
+          dupReason = `Phone and full name (${row.displayName}) match an existing employee.`;
+        } else if (tasCode && seenBatchTasCodes.has(tasCode)) {
+          dupReason = `Duplicate Employee ID ${tasCode} in the same import file.`;
+        } else if (orgEmail && seenBatchOrgEmails.has(orgEmail)) {
+          dupReason = `Duplicate Organization Email ${orgEmail} in the same import file.`;
+        } else if (persEmail && seenBatchPersonalEmails.has(persEmail)) {
+          const prev = seenBatchPersonalEmails.get(persEmail)!;
+          const distinctId = Boolean(tasCode && prev.tasCode && tasCode !== prev.tasCode);
+          if (!distinctId && (prev.normName === normName || !tasCode || !orgEmail)) {
+            dupReason = `Duplicate Personal Email ${persEmail} of row #${prev.rowNumber} in the same import file.`;
+          }
+        } else if (normPhone && normName && seenBatchPhoneNames.has(`${normPhone}|${normName}`)) {
+          dupReason = `Duplicate Name + Phone (${row.displayName}) in the same import file.`;
+        }
+      }
+
+      if (dupReason) {
+        duplicateCount += 1;
+        rowResults.push({
+          rowNumber: row.rowNumber,
+          displayName: row.displayName,
+          tasEmployeeCode: tasCode,
+          status: "duplicate",
+          reason: dupReason,
+        });
         auditRows.push({
           batch_id: batchId,
           row_number: row.rowNumber,
           raw_payload: row.raw,
-          normalized_payload: { displayName: row.displayName, status: row.employmentStatus },
-          outcome: "excluded",
-          match_signal: row.matchSignal,
+          normalized_payload: {
+            displayName: row.displayName,
+            organizationEmail: orgEmail,
+            tasEmployeeCode: tasCode,
+          },
+          outcome: "skipped",
+          match_signal: "duplicate_rejected",
+          matched_profile_id: row.matchedProfileId ?? null,
+          record_id: row.matchedRecordId ?? null,
           warnings: row.warnings,
-          errors: row.errors,
+          errors: [dupReason],
         });
         continue;
       }
 
-      if (!row.readyToImport || row.errors.length > 0) {
+      // 2. Skip excluded, invalid, or incomplete rows
+      if (row.excluded || !row.readyToImport || row.errors.length > 0) {
+        invalidCount += 1;
+        const invalidReason = row.excluded
+          ? "Excluded by HR in preview."
+          : row.errors.join("; ") || "Row requires manual review before import.";
         const isReview =
           row.category === "possible_duplicate" || row.category === "needs_information";
-        if (isReview) needsReviewCount += 1;
-        else errorCount += 1;
+        rowResults.push({
+          rowNumber: row.rowNumber,
+          displayName: row.displayName,
+          tasEmployeeCode: tasCode,
+          status: "invalid",
+          reason: invalidReason,
+        });
         auditRows.push({
           batch_id: batchId,
           row_number: row.rowNumber,
           raw_payload: row.raw,
           normalized_payload: { displayName: row.displayName },
-          outcome: isReview ? "needs_review" : "error",
+          outcome: row.excluded ? "excluded" : isReview ? "needs_review" : "error",
           match_signal: row.matchSignal,
           warnings: row.warnings,
           errors: row.errors,
@@ -1317,6 +1617,7 @@ export const commitEmployeeRecordsImport = createServerFn({ method: "POST" })
         continue;
       }
 
+      // 3. Insert genuinely new historical employee record
       try {
         const { firstName, lastName } = splitDisplayName(row.displayName);
         const driveCheck = validateGoogleDriveFolderUrl(row.driveFolderUrl ?? "");
@@ -1325,276 +1626,175 @@ export const commitEmployeeRecordsImport = createServerFn({ method: "POST" })
           ? deptByName.get(row.departmentName.trim().toLowerCase())
           : undefined;
 
-        if (row.matchedProfileId) {
-          // Outcome A: Already in Workforce -> sync Workforce canonical first, then enrich blanks only
-          const syncedRecId = await syncProfileToEmployeeRecordSafe(
-            row.matchedProfileId,
-            context.userId,
-          );
-          if (syncedRecId) {
-            const { data: curRec } = await db
-              .from("employee_records")
-              .select("*")
-              .eq("id", syncedRecId)
-              .single();
+        const docSource = computeDocumentSource(hasDrive, false);
+        const docAvail = computeDocumentAvailability(hasDrive, null);
+        const comp = computeRecordCompleteness({
+          lastName: row.lastName ?? lastName,
+          personalEmail: row.personalEmail,
+          organizationEmail: row.organizationEmail,
+          phoneNumber: row.phoneNumber,
+          address: row.address,
+          joiningDate: row.joiningDate,
+          employmentCategory: row.employmentCategory,
+          workType: row.workType,
+          departmentId: deptHit?.id ?? null,
+          departmentName: deptHit?.name ?? row.departmentName,
+          designation: row.designation,
+          documentSource: docSource,
+        });
 
-            if (curRec) {
-              const mergedLastName = curRec.last_name || lastName || row.lastName;
-              const mergedPersonalEmail = curRec.personal_email || row.personalEmail;
-              const mergedPhone = curRec.phone_number || row.phoneNumber;
-              const mergedAddress = curRec.address || row.address;
-              const mergedJoining = curRec.joining_date || row.joiningDate;
-              const mergedLwd = curRec.last_working_date || row.lastWorkingDate;
-              const mergedDriveUrl =
-                curRec.drive_folder_url || (hasDrive ? driveCheck.normalizedUrl : null);
-              const mergedDriveId =
-                curRec.drive_folder_id || (hasDrive ? driveCheck.folderId : null);
-              const hasKyc =
-                curRec.document_source === "HRM_KYC" || curRec.document_source === "BOTH";
-              const docSource = computeDocumentSource(Boolean(mergedDriveUrl), hasKyc);
-              const docAvail = computeDocumentAvailability(
-                Boolean(mergedDriveUrl),
-                curRec.kyc_summary,
-              );
+        const { data: created, error: insErr } = await db
+          .from("employee_records")
+          .insert({
+            tas_employee_code: tasCode,
+            first_name: row.firstName || firstName,
+            last_name: row.lastName ?? lastName,
+            display_name: row.displayName,
+            personal_email: row.personalEmail,
+            organization_email: row.organizationEmail,
+            phone_number: row.phoneNumber,
+            address: row.address,
+            joining_date: row.joiningDate,
+            last_working_date: row.lastWorkingDate,
+            employment_status: row.employmentStatus,
+            status_needs_review: row.statusNeedsReview,
+            status_source: row.statusSource,
+            employment_category: row.employmentCategory,
+            work_type: row.workType,
+            department_id: deptHit?.id ?? null,
+            department_name: deptHit?.name ?? row.departmentName,
+            designation: row.designation,
+            drive_folder_url: hasDrive ? driveCheck.normalizedUrl : null,
+            drive_folder_id: hasDrive ? driveCheck.folderId : null,
+            drive_match_status: hasDrive ? "verified" : "unmatched",
+            drive_matched_by: hasDrive ? context.userId : null,
+            drive_matched_at: hasDrive ? new Date().toISOString() : null,
+            document_source: docSource,
+            document_availability_status: docAvail,
+            source_type: "historical_excel",
+            source_import_batch_id: batchId,
+            last_updated_by: context.userId,
+            record_completeness: comp.score,
+            missing_fields: comp.missingFields,
+            match_confidence: "unmatched",
+            duplicate_review_status: "clear",
+            needs_review: row.statusNeedsReview,
+            review_reasons: row.warnings,
+            raw_source_snapshot: row.raw,
+          })
+          .select("id")
+          .single();
 
-              const comp = computeRecordCompleteness({
-                lastName: mergedLastName,
-                personalEmail: mergedPersonalEmail,
-                organizationEmail: curRec.organization_email,
-                phoneNumber: mergedPhone,
-                address: mergedAddress,
-                joiningDate: mergedJoining,
-                employmentCategory: curRec.employment_category,
-                workType: curRec.work_type,
-                departmentId: curRec.department_id,
-                departmentName: curRec.department_name,
-                designation: curRec.designation,
-                documentSource: docSource,
-              });
+        if (insErr) throw insErr;
 
-              await db
-                .from("employee_records")
-                .update({
-                  last_name: mergedLastName,
-                  personal_email: mergedPersonalEmail,
-                  phone_number: mergedPhone,
-                  address: mergedAddress,
-                  joining_date: mergedJoining,
-                  last_working_date: mergedLwd,
-                  drive_folder_url: mergedDriveUrl,
-                  drive_folder_id: mergedDriveId,
-                  drive_match_status: mergedDriveUrl ? "verified" : curRec.drive_match_status,
-                  document_source: docSource,
-                  document_availability_status: docAvail,
-                  record_completeness: comp.score,
-                  missing_fields: comp.missingFields,
-                  source_import_batch_id: batchId,
-                  raw_source_snapshot: row.raw,
-                  last_updated_by: context.userId,
-                })
-                .eq("id", syncedRecId);
-            }
+        await db.from("employee_employment_history").insert({
+          record_id: created.id,
+          start_date: row.joiningDate,
+          end_date: row.lastWorkingDate,
+          designation: row.designation,
+          employment_category: row.employmentCategory,
+          work_type: row.workType,
+          department_id: deptHit?.id ?? null,
+          department_name: deptHit?.name ?? row.departmentName,
+          status: row.employmentStatus === "active" ? "active" : "completed",
+          source: "historical_excel",
+          is_current: true,
+          created_by: context.userId,
+        });
+
+        // Register in seen & live sets to block any subsequent duplicate in the batch
+        if (tasCode) {
+          seenBatchTasCodes.add(tasCode);
+          dbTasCodes.add(tasCode);
+        }
+        if (orgEmail) {
+          seenBatchOrgEmails.add(orgEmail);
+          dbOrgEmails.add(orgEmail);
+        }
+        if (persEmail) {
+          if (!seenBatchPersonalEmails.has(persEmail)) {
+            seenBatchPersonalEmails.set(persEmail, { rowNumber: row.rowNumber, normName, tasCode });
           }
+          const list = dbPersonalEmails.get(persEmail) ?? [];
+          list.push({ normName, tasCode });
+          dbPersonalEmails.set(persEmail, list);
+        }
+        if (normPhone && normName) {
+          seenBatchPhoneNames.add(`${normPhone}|${normName}`);
+          dbPhoneNames.add(`${normPhone}|${normName}`);
+        }
 
-          matchedWorkforceCount += 1;
-          auditRows.push({
-            batch_id: batchId,
-            row_number: row.rowNumber,
-            raw_payload: row.raw,
-            normalized_payload: { displayName: row.displayName, matchedProfileId: row.matchedProfileId },
-            outcome: "linked_workforce",
-            record_id: syncedRecId,
-            matched_profile_id: row.matchedProfileId,
-            match_signal: row.matchSignal,
-            warnings: row.warnings,
-            errors: [],
+        importedCount += 1;
+        rowResults.push({
+          rowNumber: row.rowNumber,
+          displayName: row.displayName,
+          tasEmployeeCode: tasCode,
+          status: "imported",
+          reason: "Imported as new historical record.",
+        });
+        auditRows.push({
+          batch_id: batchId,
+          row_number: row.rowNumber,
+          raw_payload: row.raw,
+          normalized_payload: { displayName: row.displayName, status: row.employmentStatus },
+          outcome: "created_historical",
+          record_id: created.id,
+          match_signal: "new_historical",
+          warnings: row.warnings,
+          errors: [],
+        });
+      } catch (err: any) {
+        if (err?.code === "23505") {
+          const msg = "Unique constraint rejected duplicate Employee ID or Email.";
+          duplicateCount += 1;
+          rowResults.push({
+            rowNumber: row.rowNumber,
+            displayName: row.displayName,
+            tasEmployeeCode: tasCode,
+            status: "duplicate",
+            reason: msg,
           });
-        } else if (row.matchedRecordId) {
-          // Existing historical record update
-          const { data: curRec } = await db
-            .from("employee_records")
-            .select("*")
-            .eq("id", row.matchedRecordId)
-            .single();
-
-          if (curRec) {
-            const docSource = computeDocumentSource(
-              Boolean(curRec.drive_folder_url || (hasDrive ? driveCheck.normalizedUrl : null)),
-              curRec.document_source === "HRM_KYC" || curRec.document_source === "BOTH",
-            );
-            const comp = computeRecordCompleteness({
-              lastName: curRec.last_name || lastName || row.lastName,
-              personalEmail: curRec.personal_email || row.personalEmail,
-              organizationEmail: curRec.organization_email || row.organizationEmail,
-              phoneNumber: curRec.phone_number || row.phoneNumber,
-              address: curRec.address || row.address,
-              joiningDate: curRec.joining_date || row.joiningDate,
-              employmentCategory:
-                curRec.employment_category !== "unknown"
-                  ? curRec.employment_category
-                  : row.employmentCategory,
-              workType: curRec.work_type !== "unknown" ? curRec.work_type : row.workType,
-              departmentId: curRec.department_id || deptHit?.id || null,
-              departmentName: curRec.department_name || deptHit?.name || row.departmentName,
-              designation: curRec.designation || row.designation,
-              documentSource: docSource,
-            });
-
-            await db
-              .from("employee_records")
-              .update({
-                last_name: curRec.last_name || lastName || row.lastName,
-                personal_email: curRec.personal_email || row.personalEmail,
-                organization_email: curRec.organization_email || row.organizationEmail,
-                phone_number: curRec.phone_number || row.phoneNumber,
-                address: curRec.address || row.address,
-                joining_date: curRec.joining_date || row.joiningDate,
-                last_working_date: curRec.last_working_date || row.lastWorkingDate,
-                employment_category:
-                  curRec.employment_category !== "unknown"
-                    ? curRec.employment_category
-                    : row.employmentCategory,
-                work_type: curRec.work_type !== "unknown" ? curRec.work_type : row.workType,
-                department_id: curRec.department_id || deptHit?.id || null,
-                department_name: curRec.department_name || deptHit?.name || row.departmentName,
-                designation: curRec.designation || row.designation,
-                drive_folder_url:
-                  curRec.drive_folder_url || (hasDrive ? driveCheck.normalizedUrl : null),
-                drive_folder_id: curRec.drive_folder_id || (hasDrive ? driveCheck.folderId : null),
-                document_source: docSource,
-                record_completeness: comp.score,
-                missing_fields: comp.missingFields,
-                source_import_batch_id: batchId,
-                raw_source_snapshot: row.raw,
-                last_updated_by: context.userId,
-              })
-              .eq("id", row.matchedRecordId);
-          }
-          updatedCount += 1;
           auditRows.push({
             batch_id: batchId,
             row_number: row.rowNumber,
             raw_payload: row.raw,
             normalized_payload: { displayName: row.displayName },
-            outcome: "updated_historical",
-            record_id: row.matchedRecordId,
-            match_signal: row.matchSignal,
+            outcome: "skipped",
+            match_signal: "db_unique_rejected",
             warnings: row.warnings,
-            errors: [],
+            errors: [msg],
           });
         } else {
-          // Outcome B: Historical-only record creation (NO Auth account, NO TAS employee ID, NO emails sent)
-          const docSource = computeDocumentSource(hasDrive, false);
-          const docAvail = computeDocumentAvailability(hasDrive, null);
-          const comp = computeRecordCompleteness({
-            lastName: row.lastName ?? lastName,
-            personalEmail: row.personalEmail,
-            organizationEmail: row.organizationEmail,
-            phoneNumber: row.phoneNumber,
-            address: row.address,
-            joiningDate: row.joiningDate,
-            employmentCategory: row.employmentCategory,
-            workType: row.workType,
-            departmentId: deptHit?.id ?? null,
-            departmentName: deptHit?.name ?? row.departmentName,
-            designation: row.designation,
-            documentSource: docSource,
+          const msg = err instanceof Error ? err.message : "Failed to save row.";
+          failedCount += 1;
+          rowResults.push({
+            rowNumber: row.rowNumber,
+            displayName: row.displayName,
+            tasEmployeeCode: tasCode,
+            status: "failed",
+            reason: msg,
           });
-
-          const { data: created, error: insErr } = await db
-            .from("employee_records")
-            .insert({
-              first_name: row.firstName || firstName,
-              last_name: row.lastName ?? lastName,
-              display_name: row.displayName,
-              personal_email: row.personalEmail,
-              organization_email: row.organizationEmail,
-              phone_number: row.phoneNumber,
-              address: row.address,
-              joining_date: row.joiningDate,
-              last_working_date: row.lastWorkingDate,
-              employment_status: row.employmentStatus,
-              status_needs_review: row.statusNeedsReview,
-              status_source: row.statusSource,
-              employment_category: row.employmentCategory,
-              work_type: row.workType,
-              department_id: deptHit?.id ?? null,
-              department_name: deptHit?.name ?? row.departmentName,
-              designation: row.designation,
-              drive_folder_url: hasDrive ? driveCheck.normalizedUrl : null,
-              drive_folder_id: hasDrive ? driveCheck.folderId : null,
-              drive_match_status: hasDrive ? "verified" : "unmatched",
-              drive_matched_by: hasDrive ? context.userId : null,
-              drive_matched_at: hasDrive ? new Date().toISOString() : null,
-              document_source: docSource,
-              document_availability_status: docAvail,
-              source_type: "historical_excel",
-              source_import_batch_id: batchId,
-              last_updated_by: context.userId,
-              record_completeness: comp.score,
-              missing_fields: comp.missingFields,
-              match_confidence: "unmatched",
-              duplicate_review_status: "clear",
-              needs_review: row.statusNeedsReview,
-              review_reasons: row.warnings,
-              raw_source_snapshot: row.raw,
-            })
-            .select("id")
-            .single();
-
-          if (insErr) throw insErr;
-
-          await db.from("employee_employment_history").insert({
-            record_id: created.id,
-            start_date: row.joiningDate,
-            end_date: row.lastWorkingDate,
-            designation: row.designation,
-            employment_category: row.employmentCategory,
-            work_type: row.workType,
-            department_id: deptHit?.id ?? null,
-            department_name: deptHit?.name ?? row.departmentName,
-            status: row.employmentStatus === "active" ? "active" : "completed",
-            source: "historical_excel",
-            is_current: true,
-            created_by: context.userId,
-          });
-
-          newHistoricalCount += 1;
           auditRows.push({
             batch_id: batchId,
             row_number: row.rowNumber,
             raw_payload: row.raw,
-            normalized_payload: { displayName: row.displayName, status: row.employmentStatus },
-            outcome: "created_historical",
-            record_id: created.id,
-            match_signal: "new_historical",
+            normalized_payload: { displayName: row.displayName },
+            outcome: "error",
+            match_signal: row.matchSignal,
             warnings: row.warnings,
-            errors: [],
+            errors: [msg],
           });
         }
-      } catch (err) {
-        errorCount += 1;
-        auditRows.push({
-          batch_id: batchId,
-          row_number: row.rowNumber,
-          raw_payload: row.raw,
-          normalized_payload: { displayName: row.displayName },
-          outcome: "error",
-          match_signal: row.matchSignal,
-          warnings: row.warnings,
-          errors: [err instanceof Error ? err.message : "Failed to save row."],
-        });
       }
     }
 
     if (auditRows.length > 0) {
-      // Insert in chunks of 200 to handle 500–5,000 rows cleanly
       for (let i = 0; i < auditRows.length; i += 200) {
         await db.from("employee_record_import_rows").insert(auditRows.slice(i, i + 200));
       }
     }
 
-    // Outcome C: Sync Workforce-only employees missing from Excel
+    // Backfill Workforce-only employees into employee_records when requested
     let workforceSyncedCount = 0;
     if (data.syncMissingWorkforce) {
       const { syncAllWorkforceToRecords } = await import("./records/sync.server");
@@ -1605,14 +1805,21 @@ export const commitEmployeeRecordsImport = createServerFn({ method: "POST" })
     await db
       .from("employee_record_import_batches")
       .update({
-        matched_workforce_count: matchedWorkforceCount,
-        new_historical_count: newHistoricalCount,
-        updated_count: updatedCount,
-        skipped_count: skippedCount,
-        needs_review_count: needsReviewCount,
-        error_count: errorCount,
-        status: errorCount > 0 ? "partial" : "completed",
-        summary: { workforceSyncedCount },
+        matched_workforce_count: 0,
+        new_historical_count: importedCount,
+        updated_count: 0,
+        skipped_count: duplicateCount,
+        needs_review_count: invalidCount,
+        error_count: failedCount,
+        status: failedCount > 0 ? "partial" : "completed",
+        summary: {
+          workforceSyncedCount,
+          importedCount,
+          duplicateCount,
+          invalidCount,
+          failedCount,
+          rowResults: rowResults.slice(0, 1000),
+        },
         completed_at: new Date().toISOString(),
       })
       .eq("id", batchId);
@@ -1626,12 +1833,10 @@ export const commitEmployeeRecordsImport = createServerFn({ method: "POST" })
         batchKey: data.batchKey,
         fileName: data.fileName,
         totalRows: data.rows.length,
-        matchedWorkforceCount,
-        newHistoricalCount,
-        updatedCount,
-        skippedCount,
-        needsReviewCount,
-        errorCount,
+        importedCount,
+        duplicateCount,
+        invalidCount,
+        failedCount,
         workforceSyncedCount,
       },
     });
@@ -1640,14 +1845,13 @@ export const commitEmployeeRecordsImport = createServerFn({ method: "POST" })
       replayed: false,
       batchId,
       batchKey: data.batchKey,
-      matchedWorkforceCount,
-      newHistoricalCount,
-      updatedCount,
-      skippedCount,
-      needsReviewCount,
-      errorCount,
-      workforceSyncedCount,
-    };
+      totalRows: data.rows.length,
+      importedCount,
+      duplicateCount,
+      invalidCount,
+      failedCount,
+      rowResults,
+    } satisfies ImportCommitSummary;
   });
 
 /** Dry-run preview for mapping Google Drive employee folders (`TAS <> EMP <> RECORD`). */
@@ -1776,68 +1980,52 @@ export const exportEmployeeRecords = createServerFn({ method: "POST" })
     }
     const canViewConfidential = canViewRecordConfidentialFields(actor.roles, actor.permissions);
 
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const db = looseDb(supabaseAdmin);
-    const protectedIds = await loadProtectedAccountIds(context.supabase);
-
-    let query = db
-      .from("employee_records")
-      .select(
-        canViewConfidential
-          ? "*"
-          : "id, historical_record_code, profile_id, tas_employee_code, first_name, last_name, display_name, organization_email, joining_date, last_working_date, employment_status, employment_category, work_type, department_name, designation, reporting_manager_name, document_source, document_availability_status, source_type, record_completeness, last_synced_at, updated_at",
-      )
-      .order("display_name", { ascending: true });
-
-    if (!data.fullReport && data.filters) {
-      query = applyRecordFiltersToQuery(query, data.filters);
+    const { schemaReady, unified } = await loadUnifiedDataset(context.supabase);
+    if (!schemaReady && unified.length === 0) {
+      throw new Error("Employee Records data is not available yet.");
     }
 
-    const { data: rawRows, error } = await query;
-    if (error) {
-      if (isMissingSchemaResourceError(error)) {
-        throw new Error("Employee Records table is not deployed yet.");
+    const filtered =
+      !data.fullReport && data.filters
+        ? filterAndSortUnifiedRecords(unified, data.filters).filtered
+        : unified;
+
+    const cleanRows = filtered.map((rec) => {
+      const mapped = redactRecordForViewer(rec, canViewConfidential);
+      const base: Record<string, string | number | null> = {
+        "Record ID": mapped.historicalRecordCode,
+        "TAS Employee ID": mapped.tasEmployeeCode ?? "",
+        "Display Name": String(neutralizeFormula(mapped.displayName)),
+        "First Name": String(neutralizeFormula(mapped.firstName)),
+        "Last Name": String(neutralizeFormula(mapped.lastName ?? "")),
+        "Organization Email": String(neutralizeFormula(mapped.organizationEmail ?? "")),
+        "Joining Date": mapped.joiningDate ?? "",
+        "Last Working Date": mapped.lastWorkingDate ?? "",
+        "Employment Status": mapped.employmentStatus.toUpperCase(),
+        "Employment Category": mapped.employmentCategory,
+        "Work Type": mapped.workType,
+        Department: String(neutralizeFormula(mapped.departmentName ?? "")),
+        Designation: String(neutralizeFormula(mapped.designation ?? "")),
+        "Workforce Linked": mapped.profileId ? "Yes" : "No",
+        "Document Source": mapped.documentSource,
+        "Documents Availability": mapped.documentAvailabilityStatus,
+        "Source Type": mapped.sourceType,
+        "Completeness %": mapped.recordCompleteness,
+        "Last Synced At": mapped.lastSyncedAt ?? "",
+        "Last Updated At": mapped.updatedAt,
+      };
+
+      if (canViewConfidential) {
+        base["Personal Email"] = String(neutralizeFormula(mapped.personalEmail ?? ""));
+        base["Phone Number"] = String(neutralizeFormula(mapped.phoneNumber ?? ""));
+        base["Address"] = String(neutralizeFormula(mapped.address ?? ""));
+        base["Google Drive Folder URL"] = mapped.driveFolderUrl ?? "";
       }
-      rethrowDbError("Exporting Employee Records failed", error);
-    }
 
-    const cleanRows = ((rawRows ?? []) as any[])
-      .filter((r) => !r.profile_id || !protectedIds.has(r.profile_id))
-      .map((r) => {
-        const mapped = redactRecordForViewer(mapRecordRow(r), canViewConfidential);
-        const base: Record<string, string | number | null> = {
-          "Record ID": mapped.historicalRecordCode,
-          "TAS Employee ID": mapped.tasEmployeeCode ?? "",
-          "Display Name": String(neutralizeFormula(mapped.displayName)),
-          "First Name": String(neutralizeFormula(mapped.firstName)),
-          "Last Name": String(neutralizeFormula(mapped.lastName ?? "")),
-          "Organization Email": String(neutralizeFormula(mapped.organizationEmail ?? "")),
-          "Joining Date": mapped.joiningDate ?? "",
-          "Last Working Date": mapped.lastWorkingDate ?? "",
-          "Employment Status": mapped.employmentStatus.toUpperCase(),
-          "Employment Category": mapped.employmentCategory,
-          "Work Type": mapped.workType,
-          Department: String(neutralizeFormula(mapped.departmentName ?? "")),
-          Designation: String(neutralizeFormula(mapped.designation ?? "")),
-          "Workforce Linked": mapped.profileId ? "Yes" : "No",
-          "Document Source": mapped.documentSource,
-          "Documents Availability": mapped.documentAvailabilityStatus,
-          "Source Type": mapped.sourceType,
-          "Completeness %": mapped.recordCompleteness,
-          "Last Synced At": mapped.lastSyncedAt ?? "",
-          "Last Updated At": mapped.updatedAt,
-        };
+      return base;
+    });
 
-        if (canViewConfidential) {
-          base["Personal Email"] = String(neutralizeFormula(mapped.personalEmail ?? ""));
-          base["Phone Number"] = String(neutralizeFormula(mapped.phoneNumber ?? ""));
-          base["Address"] = String(neutralizeFormula(mapped.address ?? ""));
-          base["Google Drive Folder URL"] = mapped.driveFolderUrl ?? "";
-        }
-
-        return base;
-      });
-
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     await writeAudit(supabaseAdmin, {
       actorId: context.userId,
       action: "employee_record.exported",

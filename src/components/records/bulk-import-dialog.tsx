@@ -39,6 +39,7 @@ import {
   RECORD_EMPLOYMENT_CATEGORIES,
   RECORD_WORK_TYPES,
   RECORD_WORK_TYPE_LABELS,
+  type ImportCommitSummary,
   type ImportPreviewRow,
   type ImportPreviewSummary,
   type MissingWorkforceEntry,
@@ -51,8 +52,7 @@ type Step = "upload" | "mapping" | "preview" | "confirm" | "result";
 type PreviewFilter =
   | "all"
   | "ready"
-  | "matched_workforce"
-  | "new_historical"
+  | "duplicates"
   | "possible_duplicate"
   | "needs_information"
   | "invalid"
@@ -100,18 +100,7 @@ export function BulkImportDialog({
   const [bulkCategory, setBulkCategory] = useState<RecordEmploymentCategory | "">("");
   const [bulkStatus, setBulkStatus] = useState<"active" | "inactive" | "">("");
 
-  const [commitResult, setCommitResult] = useState<{
-    replayed: boolean;
-    batchId: string;
-    batchKey: string;
-    matchedWorkforceCount: number;
-    newHistoricalCount: number;
-    updatedCount: number;
-    skippedCount: number;
-    needsReviewCount: number;
-    errorCount: number;
-    workforceSyncedCount: number;
-  } | null>(null);
+  const [commitResult, setCommitResult] = useState<ImportCommitSummary | null>(null);
 
   function resetAll() {
     setStep("upload");
@@ -301,8 +290,14 @@ export function BulkImportDialog({
   const filteredPreviewRows = previewRows.filter((r) => {
     if (previewFilter === "all") return true;
     if (previewFilter === "ready") return r.readyToImport;
-    if (previewFilter === "matched_workforce") return r.category === "matched_workforce";
-    if (previewFilter === "new_historical") return r.category === "new_historical" || r.category === "existing_historical";
+    if (previewFilter === "duplicates") {
+      return (
+        r.category === "duplicate_existing" ||
+        r.category === "duplicate_in_file" ||
+        r.category === "matched_workforce" ||
+        r.category === "existing_historical"
+      );
+    }
     if (previewFilter === "possible_duplicate") return r.category === "possible_duplicate";
     if (previewFilter === "needs_information") return r.category === "needs_information";
     if (previewFilter === "invalid") return r.category === "invalid";
@@ -463,38 +458,32 @@ export function BulkImportDialog({
         {step === "preview" && summary && (
           <div className="space-y-4">
             {/* Summary Cards */}
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 text-xs">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 text-xs">
               <button
                 type="button"
-                onClick={() => setPreviewFilter("matched_workforce")}
-                className={`rounded border p-2.5 text-left transition ${previewFilter === "matched_workforce" ? "border-emerald-600 bg-emerald-50/50" : "hover:bg-muted/40"}`}
+                onClick={() => setPreviewFilter("ready")}
+                className={`rounded border p-2.5 text-left transition ${previewFilter === "ready" ? "border-emerald-600 bg-emerald-50/50" : "hover:bg-muted/40"}`}
               >
-                <div className="text-lg font-bold text-emerald-700">{summary.matchedWorkforceCount}</div>
-                <div className="text-[11px] text-muted-foreground">Matched Workforce</div>
+                <div className="text-lg font-bold text-emerald-700">{summary.readyToImportCount}</div>
+                <div className="text-[11px] text-muted-foreground">Ready (New)</div>
               </button>
               <button
                 type="button"
-                onClick={() => setPreviewFilter("new_historical")}
-                className={`rounded border p-2.5 text-left transition ${previewFilter === "new_historical" ? "border-zinc-900 bg-zinc-50" : "hover:bg-muted/40"}`}
+                onClick={() => setPreviewFilter("duplicates")}
+                className={`rounded border p-2.5 text-left transition ${previewFilter === "duplicates" ? "border-amber-600 bg-amber-50/50" : "hover:bg-muted/40"}`}
               >
-                <div className="text-lg font-bold">{summary.newHistoricalCount + summary.existingHistoricalCount}</div>
-                <div className="text-[11px] text-muted-foreground">Historical Records</div>
-              </button>
-              <button
-                type="button"
-                onClick={() => setPreviewFilter("missing_workforce")}
-                className={`rounded border p-2.5 text-left transition ${previewFilter === "missing_workforce" ? "border-blue-600 bg-blue-50/50" : "hover:bg-muted/40"}`}
-              >
-                <div className="text-lg font-bold text-blue-700">{summary.missingWorkforceCount}</div>
-                <div className="text-[11px] text-muted-foreground">Missing Workforce</div>
+                <div className="text-lg font-bold text-amber-700">{summary.duplicateCount}</div>
+                <div className="text-[11px] text-muted-foreground">
+                  Duplicates Rejected ({summary.duplicateExistingCount} existing / {summary.duplicateInFileCount} in file)
+                </div>
               </button>
               <button
                 type="button"
                 onClick={() => setPreviewFilter("possible_duplicate")}
-                className={`rounded border p-2.5 text-left transition ${previewFilter === "possible_duplicate" ? "border-amber-600 bg-amber-50/50" : "hover:bg-muted/40"}`}
+                className={`rounded border p-2.5 text-left transition ${previewFilter === "possible_duplicate" ? "border-orange-600 bg-orange-50/50" : "hover:bg-muted/40"}`}
               >
-                <div className="text-lg font-bold text-amber-700">{summary.possibleDuplicatesCount}</div>
-                <div className="text-[11px] text-muted-foreground">Possible Duplicates</div>
+                <div className="text-lg font-bold text-orange-700">{summary.possibleDuplicatesCount}</div>
+                <div className="text-[11px] text-muted-foreground">Needs Manual Review</div>
               </button>
               <button
                 type="button"
@@ -502,15 +491,15 @@ export function BulkImportDialog({
                 className={`rounded border p-2.5 text-left transition ${previewFilter === "needs_information" ? "border-red-600 bg-red-50/50" : "hover:bg-muted/40"}`}
               >
                 <div className="text-lg font-bold text-red-700">{summary.needsInformationCount + summary.invalidCount}</div>
-                <div className="text-[11px] text-muted-foreground">Needs Review / Invalid</div>
+                <div className="text-[11px] text-muted-foreground">Invalid / Missing Info</div>
               </button>
               <button
                 type="button"
-                onClick={() => setPreviewFilter("ready")}
-                className={`rounded border p-2.5 text-left transition ${previewFilter === "ready" ? "border-zinc-900 bg-zinc-100" : "hover:bg-muted/40"}`}
+                onClick={() => setPreviewFilter("missing_workforce")}
+                className={`rounded border p-2.5 text-left transition ${previewFilter === "missing_workforce" ? "border-blue-600 bg-blue-50/50" : "hover:bg-muted/40"}`}
               >
-                <div className="text-lg font-bold">{summary.readyToImportCount}</div>
-                <div className="text-[11px] text-muted-foreground">Ready to Import</div>
+                <div className="text-lg font-bold text-blue-700">{summary.missingWorkforceCount}</div>
+                <div className="text-[11px] text-muted-foreground">Workforce Only</div>
               </button>
             </div>
 
@@ -723,54 +712,42 @@ export function BulkImportDialog({
                             </div>
                           </td>
                           <td className="p-2 align-top space-y-1">
-                            {row.category === "matched_workforce" && (
-                              <Badge className="bg-emerald-600 text-white text-[10px]">
-                                Linked: {row.matchedTasCode || "Workforce"}
+                            {row.category === "duplicate_existing" && (
+                              <Badge className="bg-amber-600 text-white text-[10px]">
+                                Duplicate: Existing Employee
+                              </Badge>
+                            )}
+                            {row.category === "duplicate_in_file" && (
+                              <Badge className="bg-amber-600 text-white text-[10px]">
+                                Duplicate: Repeat in File
                               </Badge>
                             )}
                             {row.category === "new_historical" && (
-                              <Badge variant="outline" className="text-[10px]">
-                                New Historical (No Auth)
+                              <Badge className="bg-emerald-600 text-white text-[10px]">
+                                New Employee (Ready)
                               </Badge>
+                            )}
+                            {row.category === "invalid" && (
+                              <Badge className="bg-red-600 text-white text-[10px]">
+                                Invalid
+                              </Badge>
+                            )}
+                            {row.category === "needs_information" && (
+                              <Badge className="bg-red-100 text-red-800 text-[10px]">
+                                Needs Review
+                              </Badge>
+                            )}
+                            {row.duplicateReason && (
+                              <div className="text-[11px] text-amber-800">{row.duplicateReason}</div>
                             )}
                             {row.category === "possible_duplicate" && (
                               <div className="space-y-1">
-                                <Badge className="bg-amber-500 text-white text-[10px]">
-                                  Needs Manual Review
+                                <Badge className="bg-orange-500 text-white text-[10px]">
+                                  Name Match Review
                                 </Badge>
-                                {row.candidates.length > 0 && (
-                                  <select
-                                    className="block w-full h-7 rounded border border-amber-300 bg-background px-1 text-[11px]"
-                                    value={row.matchedProfileId ?? row.matchedRecordId ?? ""}
-                                    onChange={(e) => {
-                                      const val = e.target.value;
-                                      const cand = row.candidates.find(
-                                        (c) => (c.profileId ?? c.recordId) === val,
-                                      );
-                                      if (cand) {
-                                        updateRowOverride(row.rowNumber, {
-                                          matchedProfileId: cand.profileId,
-                                          matchedRecordId: cand.recordId,
-                                        });
-                                        void runPreview({
-                                          ...overridesByRow,
-                                          [row.rowNumber]: {
-                                            ...(overridesByRow[row.rowNumber] ?? {}),
-                                            matchedProfileId: cand.profileId,
-                                            matchedRecordId: cand.recordId,
-                                          },
-                                        });
-                                      }
-                                    }}
-                                  >
-                                    <option value="">Resolve candidate match...</option>
-                                    {row.candidates.map((c, idx) => (
-                                      <option key={idx} value={c.profileId ?? c.recordId ?? ""}>
-                                        Link to {c.displayName} ({c.tasEmployeeCode ?? c.historicalRecordCode}) — {c.matchSignal}
-                                      </option>
-                                    ))}
-                                  </select>
-                                )}
+                                <div className="text-[11px] text-muted-foreground">
+                                  Verify manually or exclude if same employee.
+                                </div>
                               </div>
                             )}
                             {row.errors.map((err, i) => (
@@ -853,18 +830,18 @@ export function BulkImportDialog({
               <h4 className="text-sm font-semibold">Dry-Run Safety Verification</h4>
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
                 <div className="rounded border p-2.5">
-                  <div className="text-lg font-bold text-emerald-700">{summary.matchedWorkforceCount}</div>
-                  <div className="text-muted-foreground">Link Existing Workforce</div>
+                  <div className="text-lg font-bold text-emerald-700">{summary.readyToImportCount}</div>
+                  <div className="text-muted-foreground">New Employees to Import</div>
                 </div>
                 <div className="rounded border p-2.5">
-                  <div className="text-lg font-bold">{summary.newHistoricalCount}</div>
-                  <div className="text-muted-foreground">New Historical Records</div>
+                  <div className="text-lg font-bold text-amber-700">{summary.duplicateCount}</div>
+                  <div className="text-muted-foreground">Duplicates Rejected</div>
                 </div>
                 <div className="rounded border p-2.5">
-                  <div className="text-lg font-bold text-amber-700">
-                    {summary.possibleDuplicatesCount + summary.needsInformationCount + summary.excludedCount}
+                  <div className="text-lg font-bold text-red-700">
+                    {summary.possibleDuplicatesCount + summary.needsInformationCount + summary.excludedCount + summary.invalidCount}
                   </div>
-                  <div className="text-muted-foreground">Skipped / Held for Review</div>
+                  <div className="text-muted-foreground">Invalid / Skipped / Held</div>
                 </div>
                 <div className="rounded border p-2.5">
                   <div className="text-lg font-bold text-blue-700">
@@ -880,7 +857,7 @@ export function BulkImportDialog({
                   onCheckedChange={(v) => setSyncMissingWorkforce(Boolean(v))}
                 />
                 <span>
-                  Also synchronize {summary.missingWorkforceCount} existing Workforce employee(s) not listed in this spreadsheet (`Workforce Sync`)
+                  Also backfill {summary.missingWorkforceCount} existing Workforce employee(s) into Employee Records storage
                 </span>
               </label>
 
@@ -888,8 +865,8 @@ export function BulkImportDialog({
                 <p className="font-semibold text-foreground">Safety Guarantees Verified:</p>
                 <p>• Zero Supabase Auth login accounts or invitations will be created.</p>
                 <p>• Zero emails will be dispatched; zero project allocations will be changed.</p>
+                <p>• Duplicates matching Workforce/Records or repeated in this file are strictly rejected and never overwritten.</p>
                 <p>• Historical-only entries receive archival <code className="font-mono">TAS-REC-XXXX</code> IDs (no operational TAS IDs).</p>
-                <p>• Unresolved duplicates &amp; ambiguous dates are automatically held out of insertion.</p>
               </div>
 
               <label className="flex items-center gap-2 text-xs font-semibold pt-1 cursor-pointer text-zinc-900 dark:text-zinc-100">
@@ -921,33 +898,64 @@ export function BulkImportDialog({
         {step === "result" && commitResult && (
           <div className="space-y-4 py-2">
             <Card className="p-4 border-emerald-200 bg-emerald-50/40 space-y-3">
-              <div className="flex items-center gap-2 text-emerald-800 font-semibold">
-                <CheckCircle2 className="size-5 text-emerald-600" />
-                Import Batch Complete {commitResult.replayed ? "(Idempotent Replay)" : ""}
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-emerald-800 font-semibold">
+                  <CheckCircle2 className="size-5 text-emerald-600" />
+                  Import Batch Complete {commitResult.replayed ? "(Idempotent Replay)" : ""}
+                </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    const csv = toCsv(commitResult.rowResults, [
+                      { key: "rowNumber", header: "Row", value: (r) => r.rowNumber },
+                      { key: "displayName", header: "Employee Name", value: (r) => r.displayName },
+                      { key: "tasEmployeeCode", header: "Employee ID", value: (r) => r.tasEmployeeCode ?? "" },
+                      { key: "status", header: "Outcome", value: (r) => r.status.toUpperCase() },
+                      { key: "reason", header: "Reason", value: (r) => r.reason },
+                    ]);
+                    downloadCsv(`import_report_${commitResult.batchKey}.csv`, csv);
+                  }}
+                >
+                  <Download className="mr-1.5 size-3.5" /> Download Row Report
+                </Button>
               </div>
               <div className="text-xs text-muted-foreground">
-                Batch ID: <code className="font-mono">{commitResult.batchId}</code>
+                Batch ID: <code className="font-mono">{commitResult.batchId}</code> • Total Rows: {commitResult.totalRows}
               </div>
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-xs">
                 <div className="rounded bg-background border p-2">
-                  Linked Workforce: <strong>{commitResult.matchedWorkforceCount}</strong>
+                  Imported: <strong className="text-emerald-700">{commitResult.importedCount}</strong>
                 </div>
                 <div className="rounded bg-background border p-2">
-                  New Historical: <strong>{commitResult.newHistoricalCount}</strong>
+                  Duplicates Rejected: <strong className="text-amber-700">{commitResult.duplicateCount}</strong>
                 </div>
                 <div className="rounded bg-background border p-2">
-                  Updated Historical: <strong>{commitResult.updatedCount}</strong>
+                  Invalid / Skipped: <strong className="text-red-700">{commitResult.invalidCount}</strong>
                 </div>
                 <div className="rounded bg-background border p-2">
-                  Held for Review: <strong>{commitResult.needsReviewCount}</strong>
-                </div>
-                <div className="rounded bg-background border p-2">
-                  Skipped / Excluded: <strong>{commitResult.skippedCount}</strong>
-                </div>
-                <div className="rounded bg-background border p-2">
-                  Workforce Synced: <strong>{commitResult.workforceSyncedCount}</strong>
+                  Failed: <strong>{commitResult.failedCount}</strong>
                 </div>
               </div>
+
+              {commitResult.rowResults.some((r) => r.status !== "imported") && (
+                <div className="rounded border bg-background p-2.5 max-h-48 overflow-y-auto space-y-1 text-xs">
+                  <div className="font-semibold text-muted-foreground">
+                    Rejected / Non-Imported Rows ({commitResult.rowResults.filter((r) => r.status !== "imported").length}):
+                  </div>
+                  {commitResult.rowResults
+                    .filter((r) => r.status !== "imported")
+                    .map((r) => (
+                      <div key={r.rowNumber} className="flex flex-wrap gap-2 py-0.5 border-b last:border-0">
+                        <span className="font-mono text-muted-foreground">#{r.rowNumber}</span>
+                        <span className="font-medium">{r.displayName || "(Unnamed)"}</span>
+                        <Badge variant="outline" className="text-[10px] uppercase">{r.status}</Badge>
+                        <span className="text-muted-foreground">{r.reason}</span>
+                      </div>
+                    ))}
+                </div>
+              )}
             </Card>
 
             <DialogFooter>

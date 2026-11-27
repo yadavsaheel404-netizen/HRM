@@ -26,6 +26,11 @@ import { toast } from "sonner";
 import { AccessDenied, errorToAccessScreen } from "@/components/access-denied";
 import { AppShell } from "@/components/app-shell";
 import {
+  CustomTemplatesWorkspace,
+  type CustomWorkspaceSubTab,
+} from "@/components/email-center/custom-templates-workspace";
+import { MultiRelievingPanel } from "@/components/email-center/multi-relieving-panel";
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -80,6 +85,15 @@ import {
 } from "@/lib/recruitment/email-templates";
 import { previewRelievingLetter } from "@/lib/relieving.functions";
 import { formatLetterDate, type RelievingLetterData } from "@/lib/relieving/types";
+import {
+  cancelQueuedBatchItems,
+  listCustomEmailTemplates,
+  listDispatchBatches,
+  processBulkDispatchChunk,
+  retryFailedBatchItems,
+} from "@/lib/email-center-bulk.functions";
+import { resolveEmailCenterAccessPolicy } from "@/lib/email-center/custom-templates";
+import type { EmailCenterRecipientItem } from "@/lib/email-center/types";
 
 export const Route = createFileRoute("/_authenticated/email-center")({
   loader: ({ context }) => context.queryClient.ensureQueryData(actorQueryOptions),
@@ -192,12 +206,40 @@ function EmailCenterPage() {
   const queryClient = useQueryClient();
 
   const allowed = actor.can("emails:read:all");
+  const customAccess = useMemo(
+    () =>
+      resolveEmailCenterAccessPolicy(
+        actor.roles ?? [],
+        actor.permissions ?? [],
+      ),
+    [actor.roles, actor.permissions],
+  );
+  const canViewCustomTemplates =
+    customAccess.canManageCustomTemplates || customAccess.isFounder;
 
   const centerQuery = useQuery({
     queryKey: ["recruitment", "email-center"],
     queryFn: () => getEmailCenterData(),
     enabled: allowed,
   });
+
+  const customTemplatesQuery = useQuery({
+    queryKey: ["custom-email-templates"],
+    queryFn: () => listCustomEmailTemplates(),
+    enabled: allowed && canViewCustomTemplates,
+  });
+
+  const dispatchBatchesQuery = useQuery({
+    queryKey: ["email-dispatch-batches"],
+    queryFn: () => listDispatchBatches(),
+    enabled: allowed,
+  });
+
+  // Custom Email Templates workspace navigation state
+  const [customModeActive, setCustomModeActive] = useState(false);
+  const [selectedCustomTemplateId, setSelectedCustomTemplateId] = useState<string | null>(null);
+  const [customWorkspaceSubTab, setCustomWorkspaceSubTab] =
+    useState<CustomWorkspaceSubTab>("library");
 
   // Template editor state
   const [selectedSlug, setSelectedSlug] = useState<string>("application_received");
@@ -543,6 +585,70 @@ function EmailCenterPage() {
       signatory_title: "HR - Director",
       company_address: "T-hub 2.0, Knowledge City, Hyderabad, Telangana",
       company_contact: "+91 92468 18843",
+    }));
+  }
+
+  function handleSelectFromUnifiedRecipient(rec: EmailCenterRecipientItem) {
+    const rc = rec.relievingCase;
+    const joiningFormatted = rc?.joiningDate || rec.joiningDate || "2026-07-02";
+    const lastWorkingFormatted =
+      rc?.lastWorkingDay || rec.lastWorkingDate || new Date().toISOString().slice(0, 10);
+    const relievingFormatted =
+      rc?.relievingEffectiveDate || rc?.lastWorkingDay || lastWorkingFormatted;
+    const issueFormatted = rc?.letterIssueDate || lastWorkingFormatted;
+    const caseApproved =
+      rc?.status === "approved" || rc?.status === "relieved";
+
+    const updated: RelievingLetterData = {
+      ...letterData,
+      employeeName: rec.fullName,
+      designation: rc?.designation || rec.designation || "AI Data Annotation Analyst – Intern",
+      legalEmployer:
+        rc?.legalEmployer || rec.legalEmployer || "Learning Paths Technologies LLP",
+      joiningDate: joiningFormatted,
+      lastWorkingDay: lastWorkingFormatted,
+      relievingEffectiveDate: relievingFormatted,
+      letterIssueDate: issueFormatted,
+      contributedProjects:
+        rc?.contributedProjects ||
+        `various ${rc?.designation || rec.designation || "Organizational"} and related projects`,
+      performanceStatement: rc?.performanceStatement || "found to be satisfactory",
+      signatoryName: rc?.signatoryName || "K. Spandana",
+      signatoryTitle: rc?.signatoryTitle || "HR - Director",
+      signatoryDesignation: rc?.signatoryDesignation || "Director",
+      companyContact: rc?.companyContact || "+91 92468 18843",
+      companyAddress:
+        rc?.companyAddress || "T-hub 2.0, Knowledge City, Hyderabad, Telangana",
+      isDraft: !caseApproved ? true : isDraftMode,
+      includeSignature: caseApproved ? true : false,
+    };
+
+    if (!caseApproved && !isDraftMode) {
+      setIsDraftMode(true);
+    }
+    setSelectedEmployeeId(rec.profileId || rec.recordId);
+    setLetterData(updated);
+    void refreshLetterPdf(updated, !caseApproved ? true : isDraftMode);
+
+    // Sync compose fields for single recipient
+    setComposeEmployeeId(rec.profileId || rec.recordId);
+    setComposeRecipientEmail(rec.personalEmail || rec.workEmail || "");
+    setComposeRecipientName(rec.fullName);
+    setComposeVars((prev) => ({
+      ...prev,
+      employee_name: rec.fullName,
+      candidate_name: rec.fullName,
+      employee_id: rec.employeeCode || rec.historicalRecordId,
+      designation: updated.designation,
+      employment_start_date: formatLetterDate(joiningFormatted),
+      employment_end_date: formatLetterDate(lastWorkingFormatted),
+      relieving_date: formatLetterDate(relievingFormatted),
+      issue_date: formatLetterDate(issueFormatted),
+      legal_employer: updated.legalEmployer,
+      signatory_name: updated.signatoryName,
+      signatory_title: updated.signatoryTitle,
+      company_address: updated.companyAddress || "T-hub 2.0, Knowledge City, Hyderabad, Telangana",
+      company_contact: updated.companyContact || "+91 92468 18843",
     }));
   }
 
@@ -941,12 +1047,15 @@ function EmailCenterPage() {
                       </p>
                       <div className="space-y-1">
                         {catTemplates.map((tpl) => {
-                          const selected = tpl.slug === activeTemplate?.slug;
+                          const selected = !customModeActive && tpl.slug === activeTemplate?.slug;
                           return (
                             <button
                               key={tpl.slug}
                               type="button"
-                              onClick={() => setSelectedSlug(tpl.slug)}
+                              onClick={() => {
+                                setCustomModeActive(false);
+                                setSelectedSlug(tpl.slug);
+                              }}
                               className={`flex w-full items-center justify-between rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors ${selected
                                 ? "border-primary bg-primary/10 font-semibold text-primary"
                                 : "border-border/60 bg-card text-muted-foreground hover:bg-muted/40 hover:text-foreground"
@@ -963,12 +1072,108 @@ function EmailCenterPage() {
                     </div>
                   );
                 })}
+
+                {/* CUSTOM EMAIL TEMPLATES — Directly below Relieving & Experience Letters */}
+                {canViewCustomTemplates ? (
+                  <div className="space-y-2 border-t border-border pt-3">
+                    <div className="flex items-center justify-between px-1">
+                      <p className="text-[11px] font-bold uppercase tracking-wider text-primary">
+                        Custom Email Templates ({customTemplatesQuery.data?.templates.length ?? 0})
+                      </p>
+                      <Badge variant="outline" className="text-[9px]">
+                        DOCX / PDF
+                      </Badge>
+                    </div>
+                    <div className="grid gap-1">
+                      {customAccess.canManageCustomTemplates ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCustomModeActive(true);
+                              setSelectedCustomTemplateId(null);
+                              setCustomWorkspaceSubTab("compose");
+                            }}
+                            className="flex w-full items-center justify-between rounded-md border border-border/80 bg-card px-2.5 py-1.5 text-left text-xs font-medium text-foreground transition-colors hover:border-primary hover:bg-primary/5"
+                          >
+                            <span>+ Create Custom Template</span>
+                            <Badge variant="outline" className="text-[9px]">New</Badge>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCustomModeActive(true);
+                              setCustomWorkspaceSubTab("compose");
+                            }}
+                            className="flex w-full items-center justify-between rounded-md border border-border/80 bg-card px-2.5 py-1.5 text-left text-xs font-medium text-foreground transition-colors hover:border-primary hover:bg-primary/5"
+                          >
+                            <span>Upload Word / PDF</span>
+                            <Badge variant="outline" className="text-[9px]">Private</Badge>
+                          </button>
+                        </>
+                      ) : null}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCustomModeActive(true);
+                          setCustomWorkspaceSubTab("library");
+                        }}
+                        className={`flex w-full items-center justify-between rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors ${
+                          customModeActive && !selectedCustomTemplateId
+                            ? "border-primary bg-primary/10 font-semibold text-primary"
+                            : "border-border/60 bg-card text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+                        }`}
+                      >
+                        <span>Manage Templates</span>
+                        <span className="font-mono text-[10px]">
+                          {customTemplatesQuery.data?.templates.length ?? 0}
+                        </span>
+                      </button>
+                      {(customTemplatesQuery.data?.templates ?? []).map((ct) => {
+                        const isSelected = customModeActive && selectedCustomTemplateId === ct.id;
+                        return (
+                          <button
+                            key={ct.id}
+                            type="button"
+                            onClick={() => {
+                              setCustomModeActive(true);
+                              setSelectedCustomTemplateId(ct.id);
+                              setCustomWorkspaceSubTab("compose");
+                            }}
+                            className={`flex w-full items-center justify-between rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors ${
+                              isSelected
+                                ? "border-primary bg-primary/10 font-semibold text-primary"
+                                : "border-border/60 bg-card text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+                            }`}
+                          >
+                            <span className="truncate pr-1.5">{ct.name}</span>
+                            <Badge variant="outline" className="shrink-0 text-[9px] uppercase">
+                              {ct.attachmentFormat === "none" ? ct.status : ct.attachmentFormat}
+                            </Badge>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : null}
               </CardContent>
             </Card>
 
             {/* Right Editor + Live Branded Preview */}
             <div className="space-y-4 lg:col-span-8">
-              {activeTemplate?.slug === "employee_relieving_letter" ? (
+              {customModeActive && canViewCustomTemplates ? (
+                <CustomTemplatesWorkspace
+                  selectedTemplateId={selectedCustomTemplateId}
+                  onSelectTemplateId={setSelectedCustomTemplateId}
+                  subTab={customWorkspaceSubTab}
+                  onChangeSubTab={setCustomWorkspaceSubTab}
+                  providerConfigured={providerConfigured}
+                  onBatchUpdated={() => {
+                    void dispatchBatchesQuery.refetch();
+                    void refreshCenter();
+                  }}
+                />
+              ) : activeTemplate?.slug === "employee_relieving_letter" ? (
                 /* OFFICIAL LETTER (PDF) as PRIMARY + EMAIL MESSAGE as SECONDARY */
                 <Tabs
                   value={relievingSubTab}
@@ -1048,25 +1253,17 @@ function EmailCenterPage() {
                       </CardHeader>
 
                       <CardContent className="space-y-4">
-                        {/* Employee Selector */}
-                        <div className="rounded-lg border border-primary/30 bg-primary/5 p-3.5 space-y-1.5">
-                          <Label htmlFor="select-letter-emp" className="text-xs font-semibold text-primary">
-                            Select Workforce Employee (Auto-Fill)
-                          </Label>
-                          <select
-                            id="select-letter-emp"
-                            value={selectedEmployeeId}
-                            onChange={(e) => handleSelectWorkforceEmployee(e.target.value)}
-                            className="flex h-9 w-full rounded-md border border-input bg-background px-3 py-1 text-xs font-medium text-foreground"
-                          >
-                            <option value="">Choose employee to verify &amp; auto-fill dates...</option>
-                            {(data?.employees ?? []).map((emp: any) => (
-                              <option key={emp.id} value={emp.id}>
-                                {emp.fullName} ({emp.employeeCode}) — {emp.designation} — {emp.workEmail}
-                              </option>
-                            ))}
-                          </select>
-                        </div>
+                        {/* Searchable Single & Multi-Employee Selector (Workforce + Employee Records) */}
+                        <MultiRelievingPanel
+                          canSendEmails={canSendEmails}
+                          canViewPersonalEmails={customAccess.canViewPersonalEmails}
+                          providerConfigured={providerConfigured}
+                          onSelectSingleEmployee={handleSelectFromUnifiedRecipient}
+                          onBatchUpdated={() => {
+                            void dispatchBatchesQuery.refetch();
+                            void refreshCenter();
+                          }}
+                        />
 
                         {/* Editable Form Inputs Grid */}
                         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 text-xs">
@@ -1885,17 +2082,17 @@ function EmailCenterPage() {
 
                 {composeMode === "bulk" ? (
                   composeSlug === "employee_relieving_letter" ? (
-                    <div className="rounded-md border border-amber-500/40 bg-amber-500/10 p-3.5 text-xs text-amber-800 dark:text-amber-200 space-y-1.5">
-                      <div className="flex items-center gap-1.5 font-semibold text-sm text-amber-900 dark:text-amber-100">
-                        <AlertTriangle className="size-4 text-amber-600" />
-                        <span>Individual Legal Certification Only</span>
-                      </div>
-                      <p>
-                        Official Relieving &amp; Experience Letters contain individualized legal tenure statements, registered employer seals, and verified authorized signatures. Bulk dispatch is restricted for this document.
-                      </p>
-                      <p className="font-medium pt-1">
-                        Please switch to <strong>Individual Candidate</strong> mode above to select a workforce employee and preview or dispatch their letter.
-                      </p>
+                    <div className="space-y-3">
+                      <MultiRelievingPanel
+                        canSendEmails={canSendEmails}
+                        canViewPersonalEmails={customAccess.canViewPersonalEmails}
+                        providerConfigured={providerConfigured}
+                        onSelectSingleEmployee={handleSelectFromUnifiedRecipient}
+                        onBatchUpdated={() => {
+                          void dispatchBatchesQuery.refetch();
+                          void refreshCenter();
+                        }}
+                      />
                     </div>
                   ) : (
                     <div className="space-y-2">
@@ -2333,6 +2530,134 @@ function EmailCenterPage() {
               <code>delivered</code>, unless verified delivery evidence exists.
             </p>
           </div>
+
+          {(dispatchBatchesQuery.data?.batches?.length ?? 0) > 0 ? (
+            <Card>
+              <CardHeader className="pb-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <CardTitle className="text-sm">Bulk Dispatch Queue Batches</CardTitle>
+                    <CardDescription className="text-xs">
+                      Controlled Hostinger SMTP batches (Relieving Letters &amp; Custom Email Templates).
+                    </CardDescription>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void dispatchBatchesQuery.refetch()}
+                  >
+                    <RefreshCw className="mr-1.5 size-3" />
+                    Refresh Batches
+                  </Button>
+                </div>
+              </CardHeader>
+              <CardContent>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead>
+                      <tr className="border-b border-border text-muted-foreground">
+                        <th className="pb-2 pr-3 font-medium">Template</th>
+                        <th className="pb-2 pr-3 font-medium">Kind</th>
+                        <th className="pb-2 pr-3 font-medium">Status</th>
+                        <th className="pb-2 pr-3 font-medium">Accepted / Total</th>
+                        <th className="pb-2 pr-3 font-medium">Queued / Failed / Canceled</th>
+                        <th className="pb-2 pr-3 font-medium">Personal / Work</th>
+                        <th className="pb-2 text-right font-medium">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border/60">
+                      {(dispatchBatchesQuery.data?.batches ?? []).map((b) => (
+                        <tr key={b.id}>
+                          <td className="py-2.5 pr-3 font-medium">{b.templateName}</td>
+                          <td className="py-2.5 pr-3 font-mono text-[11px]">{b.dispatchKind}</td>
+                          <td className="py-2.5 pr-3 capitalize">{b.status.replace(/_/g, " ")}</td>
+                          <td className="py-2.5 pr-3 font-mono">
+                            {b.acceptedCount} / {b.totalCount}
+                          </td>
+                          <td className="py-2.5 pr-3 font-mono">
+                            {b.queuedCount} / {b.failedCount} / {b.canceledCount}
+                          </td>
+                          <td className="py-2.5 pr-3 text-[11px]">
+                            {b.personalEmailCount} Personal • {b.workEmailCount} Work
+                          </td>
+                          <td className="py-2.5 text-right">
+                            <div className="flex justify-end gap-1.5">
+                              {canSendEmails && b.queuedCount > 0 ? (
+                                <>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="h-7 text-[11px]"
+                                    onClick={async () => {
+                                      try {
+                                        await processBulkDispatchChunk({
+                                          data: { batchId: b.id, chunkSize: 10 },
+                                        });
+                                        await dispatchBatchesQuery.refetch();
+                                        toast.success("Processed next queued chunk.");
+                                      } catch (e) {
+                                        toast.error(describeUnknownError(e));
+                                      }
+                                    }}
+                                  >
+                                    Resume Chunk
+                                  </Button>
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    className="h-7 text-[11px]"
+                                    onClick={async () => {
+                                      try {
+                                        await cancelQueuedBatchItems({ data: { batchId: b.id } });
+                                        await dispatchBatchesQuery.refetch();
+                                        toast.info("Canceled unsent queued items.");
+                                      } catch (e) {
+                                        toast.error(describeUnknownError(e));
+                                      }
+                                    }}
+                                  >
+                                    Cancel Unsent
+                                  </Button>
+                                </>
+                              ) : null}
+                              {canSendEmails && b.failedCount > 0 ? (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="h-7 text-[11px]"
+                                  onClick={async () => {
+                                    try {
+                                      const res = await retryFailedBatchItems({
+                                        data: { batchId: b.id },
+                                      });
+                                      if (res.requeuedCount > 0) {
+                                        await processBulkDispatchChunk({
+                                          data: { batchId: b.id, chunkSize: 10 },
+                                        });
+                                      }
+                                      await dispatchBatchesQuery.refetch();
+                                      toast.success(
+                                        `Retried ${res.requeuedCount} failed item(s).`,
+                                      );
+                                    } catch (e) {
+                                      toast.error(describeUnknownError(e));
+                                    }
+                                  }}
+                                >
+                                  <RotateCcw className="mr-1 size-3" />
+                                  Retry Failed
+                                </Button>
+                              ) : null}
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </CardContent>
+            </Card>
+          ) : null}
 
           <Card>
             <CardContent className="pt-5">

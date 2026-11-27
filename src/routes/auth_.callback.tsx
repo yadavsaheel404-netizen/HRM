@@ -1,7 +1,8 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { EmailOtpType } from "@supabase/supabase-js";
 import { supabase } from "@/integrations/supabase/client";
+import { buildSanitizedAuthPath, parseAuthRecoveryLocation } from "@/lib/app-url";
 import { Logo } from "@/components/brand/logo";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -22,42 +23,55 @@ function sanitizeNextPath(raw: string | null): "/dashboard" | "/auth/reset-passw
 function AuthCallbackPage() {
   const navigate = useNavigate();
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const startedRef = useRef(false);
 
   useEffect(() => {
+    if (startedRef.current) return;
+    startedRef.current = true;
     let cancelled = false;
 
     async function completeAuth() {
-      try {
-        const url = new URL(window.location.href);
-        const code = url.searchParams.get("code");
-        const tokenHash = url.searchParams.get("token_hash");
-        const queryType = url.searchParams.get("type");
-        const nextParam = url.searchParams.get("next");
-        const errorDescription =
-          url.searchParams.get("error_description") || url.searchParams.get("error");
+      const url = new URL(window.location.href);
+      const parsed = parseAuthRecoveryLocation(window.location);
 
-        const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
-        const hashType = hashParams.get("type");
-        const hashError = hashParams.get("error_description") || hashParams.get("error");
-
-        if (errorDescription || hashError) {
-          throw new Error(
-            errorDescription || hashError || "Authentication link is invalid or expired.",
+      const scrubSensitiveUrl = () => {
+        if (parsed.hasSensitiveParams) {
+          window.history.replaceState(
+            null,
+            "",
+            buildSanitizedAuthPath(url.pathname, url.search),
           );
         }
+      };
 
-        const effectiveType = queryType || hashType;
+      try {
+        const nextParam = url.searchParams.get("next");
 
-        if (code) {
-          const { error } = await supabase.auth.exchangeCodeForSession(code);
+        if (parsed.errorDescription) {
+          scrubSensitiveUrl();
+          throw new Error(parsed.errorDescription);
+        }
+
+        if (parsed.code) {
+          const { error } = await supabase.auth.exchangeCodeForSession(parsed.code);
+          scrubSensitiveUrl();
           if (error) throw error;
-        } else if (tokenHash && queryType) {
+        } else if (parsed.tokenHash && parsed.queryType) {
           const { error } = await supabase.auth.verifyOtp({
-            token_hash: tokenHash,
-            type: queryType as EmailOtpType,
+            token_hash: parsed.tokenHash,
+            type: parsed.queryType as EmailOtpType,
           });
+          scrubSensitiveUrl();
+          if (error) throw error;
+        } else if (parsed.accessToken && parsed.refreshToken) {
+          const { error } = await supabase.auth.setSession({
+            access_token: parsed.accessToken,
+            refresh_token: parsed.refreshToken,
+          });
+          scrubSensitiveUrl();
           if (error) throw error;
         } else {
+          scrubSensitiveUrl();
           const { data, error } = await supabase.auth.getSession();
           if (error) throw error;
           if (!data.session) {
@@ -67,13 +81,14 @@ function AuthCallbackPage() {
 
         if (cancelled) return;
 
-        if (effectiveType === "recovery" || effectiveType === "invite") {
+        if (parsed.isRecoveryFlow) {
           navigate({ to: "/auth/reset-password", replace: true });
           return;
         }
 
         navigate({ to: sanitizeNextPath(nextParam), replace: true });
       } catch (err) {
+        scrubSensitiveUrl();
         if (!cancelled) {
           setErrorMsg(
             err instanceof Error ? err.message : "Could not verify your authentication link.",

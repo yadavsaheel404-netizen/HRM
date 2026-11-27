@@ -14,8 +14,10 @@ import {
   CUSTOM_TEMPLATES_BUCKET,
   DISPATCH_CHUNK_SIZE,
   OFFICIAL_SENDER_DISPLAY,
+  type CustomDocumentMode,
   type CustomEmailTemplateRecord,
   type CustomEmailTemplateVersionRecord,
+  type DocxFieldMappingRule,
   type EmailCenterAccessPolicy,
   type EmailCenterRecipientItem,
   type EmailDispatchBatchRecord,
@@ -26,13 +28,16 @@ import {
 } from "./email-center/types";
 import {
   buildApprovedLettersZip,
+  buildPersonalizedAttachmentFilename,
   buildRecipientPlaceholderVariables,
   deduplicateRecipientDispatches,
+  detectUnmappedBlankFieldsInDocx,
   evaluateCustomTemplateRecipientReadiness,
   evaluateRelievingRecipientReadiness,
   extractDocxPlaceholders,
   extractTemplatePlaceholdersFromStrings,
   inspectPdfTemplate,
+  isRelievingStyleCustomTemplate,
   personalizeDocxBuffer,
   personalizeFillablePdf,
   renderCustomEmailContent,
@@ -160,6 +165,14 @@ function mapCustomTemplateRow(
   row: any,
   canViewAttachmentPath: boolean,
 ): CustomEmailTemplateRecord {
+  const isRelieving = isRelievingStyleCustomTemplate({
+    templateName: row.name,
+    attachmentFilename: row.attachment_filename,
+    purposeCategory: row.purpose_category,
+    requiresRelievingApproval: Boolean(row.requires_relieving_approval),
+  });
+  const defaultDocMode: CustomDocumentMode =
+    !isRelieving && row.pdf_mode === "static" ? "static" : "personalized";
   return {
     id: row.id,
     name: row.name,
@@ -175,6 +188,13 @@ function mapCustomTemplateRow(
     attachmentSizeBytes: row.attachment_size_bytes ?? null,
     attachmentSha256: row.attachment_sha256 ?? null,
     pdfMode: row.pdf_mode ?? null,
+    documentMode: (row.document_mode === "static" && !isRelieving
+      ? "static"
+      : row.document_mode || defaultDocMode) as CustomDocumentMode,
+    fieldMappings: Array.isArray(row.field_mappings)
+      ? (row.field_mappings as DocxFieldMappingRule[])
+      : [],
+    requiresRelievingApproval: Boolean(row.requires_relieving_approval) || isRelieving,
     detectedPlaceholders: Array.isArray(row.detected_placeholders) ? row.detected_placeholders : [],
     recipientType: row.recipient_type ?? "all_records",
     defaultEmailMode: (row.default_email_mode ?? "personal") as RecipientEmailMode,
@@ -681,6 +701,10 @@ export const listCustomEmailTemplates = createServerFn({ method: "POST" })
           subjectTemplate: v.subject_template,
           attachmentFilename: v.attachment_filename ?? null,
           attachmentFormat: v.attachment_format ?? "none",
+          documentMode: (v.document_mode ?? "personalized") as CustomDocumentMode,
+          fieldMappings: Array.isArray(v.field_mappings)
+            ? (v.field_mappings as DocxFieldMappingRule[])
+            : [],
           detectedPlaceholders: Array.isArray(v.detected_placeholders) ? v.detected_placeholders : [],
           status: v.status,
           changedBy: v.changed_by ?? null,
@@ -715,6 +739,9 @@ export const uploadAndSaveCustomTemplate = createServerFn({ method: "POST" })
       recipientType?: CustomEmailTemplateRecord["recipientType"];
       defaultEmailMode?: RecipientEmailMode;
       status?: CustomEmailTemplateRecord["status"];
+      documentMode?: CustomDocumentMode;
+      fieldMappings?: DocxFieldMappingRule[];
+      requiresRelievingApproval?: boolean;
       requiresElevatedApproval?: boolean;
       clearAttachment?: boolean;
       file?: {
@@ -783,7 +810,14 @@ export const uploadAndSaveCustomTemplate = createServerFn({ method: "POST" })
       : Array.isArray(existing?.detected_placeholders)
         ? existing.detected_placeholders
         : [];
+    let fieldMappings: DocxFieldMappingRule[] = data.clearAttachment
+      ? []
+      : data.fieldMappings ??
+        (Array.isArray(existing?.field_mappings)
+          ? (existing.field_mappings as DocxFieldMappingRule[])
+          : []);
     let pdfWarning: string | null = null;
+    let isLikelyRelievingDoc = false;
 
     if (data.file) {
       const bytes = new Uint8Array(Buffer.from(data.file.base64Data, "base64"));
@@ -797,14 +831,27 @@ export const uploadAndSaveCustomTemplate = createServerFn({ method: "POST" })
       }
 
       if (validation.format === "docx") {
-        const docInfo = extractDocxPlaceholders(bytes);
-        attachmentPlaceholders = docInfo.detectedPlaceholders;
+        const docInfo = extractDocxPlaceholders(bytes, data.fieldMappings);
+        isLikelyRelievingDoc = docInfo.blankDetection.isLikelyRelievingTemplate;
+        if (
+          (!data.fieldMappings || data.fieldMappings.length === 0) &&
+          docInfo.blankDetection.suggestedMappings.length > 0
+        ) {
+          fieldMappings = docInfo.blankDetection.suggestedMappings;
+        }
+        attachmentPlaceholders = [
+          ...new Set([
+            ...docInfo.detectedPlaceholders,
+            ...fieldMappings.filter((m) => m.enabled).map((m) => m.placeholder),
+          ]),
+        ];
         pdfMode = null;
       } else {
         const pdfInfo = await inspectPdfTemplate(bytes);
         attachmentPlaceholders = pdfInfo.detectedPlaceholders;
         pdfMode = pdfInfo.mode;
         pdfWarning = pdfInfo.warning;
+        fieldMappings = [];
       }
 
       const storagePath = `${templateId}/v${nextVersion}/${validation.safeFileName}`;
@@ -827,16 +874,40 @@ export const uploadAndSaveCustomTemplate = createServerFn({ method: "POST" })
       attachmentSha256 = crypto.createHash("sha256").update(bytes).digest("hex");
     }
 
+    const isRelievingTemplate = isRelievingStyleCustomTemplate({
+      templateName: data.name,
+      attachmentFilename,
+      purposeCategory: data.purposeCategory,
+      requiresRelievingApproval: Boolean(data.requiresRelievingApproval) || isLikelyRelievingDoc,
+    });
+
+    if (isRelievingTemplate && data.documentMode === "static") {
+      throw new Error(
+        "Relieving / Experience Letter templates must use PERSONALIZED DOCUMENT mode and cannot be saved as Static Documents.",
+      );
+    }
+
+    const resolvedDocumentMode: CustomDocumentMode = isRelievingTemplate
+      ? "personalized"
+      : data.documentMode ??
+        (existing?.document_mode as CustomDocumentMode | undefined) ??
+        (pdfMode === "static" ? "static" : "personalized");
+
     const bodyPlaceholders = extractTemplatePlaceholdersFromStrings([
       data.subjectTemplate,
       data.bodyHtmlTemplate,
       data.bodyTextTemplate ?? "",
     ]);
-    const detectedPlaceholders = [...new Set([...bodyPlaceholders, ...attachmentPlaceholders])];
+    const mappingPlaceholders = fieldMappings
+      .filter((m) => m.enabled)
+      .map((m) => m.placeholder);
+    const detectedPlaceholders = [
+      ...new Set([...bodyPlaceholders, ...attachmentPlaceholders, ...mappingPlaceholders]),
+    ];
     const nextStatus = data.status ?? existing?.status ?? "draft";
     const nowIso = new Date().toISOString();
 
-    const rowPayload = {
+    const rowPayload: Record<string, unknown> = {
       id: templateId,
       name: data.name.trim(),
       description: (data.description ?? "").trim(),
@@ -851,6 +922,9 @@ export const uploadAndSaveCustomTemplate = createServerFn({ method: "POST" })
       attachment_size_bytes: attachmentSizeBytes,
       attachment_sha256: attachmentSha256,
       pdf_mode: pdfMode,
+      document_mode: resolvedDocumentMode,
+      field_mappings: fieldMappings,
+      requires_relieving_approval: isRelievingTemplate,
       detected_placeholders: detectedPlaceholders,
       recipient_type: data.recipientType ?? existing?.recipient_type ?? "all_records",
       default_email_mode: data.defaultEmailMode ?? existing?.default_email_mode ?? "personal",
@@ -865,29 +939,54 @@ export const uploadAndSaveCustomTemplate = createServerFn({ method: "POST" })
       approved_at: nextStatus === "approved" ? (existing?.approved_at ?? nowIso) : existing?.approved_at ?? null,
     };
 
-    const { data: saved, error: saveErr } = await db
+    let { data: saved, error: saveErr } = await db
       .from("custom_email_templates")
       .upsert(rowPayload, { onConflict: "id" })
       .select("*")
       .single();
 
+    // Graceful fallback if new mapping columns haven't been migrated on DB yet
+    if (saveErr && isMissingSchemaResourceError(saveErr)) {
+      const {
+        document_mode: _dm,
+        field_mappings: _fm,
+        requires_relieving_approval: _rra,
+        ...legacyPayload
+      } = rowPayload;
+      const retry = await db
+        .from("custom_email_templates")
+        .upsert(legacyPayload, { onConflict: "id" })
+        .select("*")
+        .single();
+      saved = retry.data;
+      saveErr = retry.error;
+    }
+
     if (saveErr) rethrowDbError("Saving custom email template failed", saveErr);
 
-    await db.from("custom_email_template_versions").insert({
+    const versionPayload: Record<string, unknown> = {
       template_id: templateId,
       version: nextVersion,
-      name: rowPayload.name,
-      subject_template: rowPayload.subject_template,
-      body_html_template: rowPayload.body_html_template,
-      body_text_template: rowPayload.body_text_template,
-      attachment_path: rowPayload.attachment_path,
-      attachment_filename: rowPayload.attachment_filename,
-      attachment_format: rowPayload.attachment_format,
-      attachment_sha256: rowPayload.attachment_sha256,
-      detected_placeholders: rowPayload.detected_placeholders,
-      status: rowPayload.status,
+      name: rowPayload["name"],
+      subject_template: rowPayload["subject_template"],
+      body_html_template: rowPayload["body_html_template"],
+      body_text_template: rowPayload["body_text_template"],
+      attachment_path: rowPayload["attachment_path"],
+      attachment_filename: rowPayload["attachment_filename"],
+      attachment_format: rowPayload["attachment_format"],
+      attachment_sha256: rowPayload["attachment_sha256"],
+      document_mode: resolvedDocumentMode,
+      field_mappings: fieldMappings,
+      detected_placeholders: rowPayload["detected_placeholders"],
+      status: rowPayload["status"],
       changed_by: context.userId,
-    });
+    };
+
+    const verRes = await db.from("custom_email_template_versions").insert(versionPayload);
+    if (verRes.error && isMissingSchemaResourceError(verRes.error)) {
+      const { document_mode: _dm, field_mappings: _fm, ...legacyVer } = versionPayload;
+      await db.from("custom_email_template_versions").insert(legacyVer);
+    }
 
     await writeAudit(context.supabase, {
       actorId: context.userId,
@@ -895,31 +994,133 @@ export const uploadAndSaveCustomTemplate = createServerFn({ method: "POST" })
       entityType: "custom_email_template",
       entityId: templateId,
       detail: {
-        name: rowPayload.name,
+        name: rowPayload["name"],
         version: nextVersion,
         status: nextStatus,
         attachmentFormat,
+        documentMode: resolvedDocumentMode,
         pdfMode,
         detectedPlaceholders,
+        mappedFieldsCount: fieldMappings.filter((m) => m.enabled).length,
       },
     });
 
     return {
-      template: mapCustomTemplateRow(saved, true),
+      template: {
+        ...mapCustomTemplateRow(saved, true),
+        documentMode: resolvedDocumentMode,
+        fieldMappings,
+        requiresRelievingApproval: isRelievingTemplate,
+      },
       pdfWarning,
+      suggestedMappings: fieldMappings,
     };
   });
 
 /**
- * 6. Previews a Custom Email Template (subject, HTML, text, DOCX paragraphs / PDF attachment)
+ * 5b. Inspects an already-uploaded DOCX/PDF attachment from private storage to detect blank fields
+ * and suggest controlled placeholder mappings (e.g., for TEMPLATE_RELIEVING_LETTER.docx).
+ */
+export const inspectStoredCustomTemplate = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((input: { templateId: string }) => {
+    if (!input?.templateId) throw new Error("Custom template ID is required.");
+    return input;
+  })
+  .handler(async ({ data, context }) => {
+    const actor = await loadActor(context.supabase, context.userId);
+    const access = resolveEmailCenterAccessPolicy(actor.roles, actor.permissions);
+    if (!access.canManageCustomTemplates) {
+      throw new Error("Forbidden: Only HR or Super Admin can inspect stored custom template files.");
+    }
+
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const db = looseDb(supabaseAdmin);
+
+    const { data: tplRow, error: tplErr } = await db
+      .from("custom_email_templates")
+      .select("*")
+      .eq("id", data.templateId)
+      .maybeSingle();
+
+    if (tplErr) rethrowDbError("Loading custom template failed", tplErr);
+    if (!tplRow) throw new Error("Custom email template not found.");
+    if (!tplRow.attachment_path) {
+      return {
+        detectedPlaceholders: [] as string[],
+        suggestedMappings: [] as DocxFieldMappingRule[],
+        hasUnmappedBlanks: false,
+        isLikelyRelievingTemplate: isRelievingStyleCustomTemplate({
+          templateName: tplRow.name,
+          purposeCategory: tplRow.purpose_category,
+        }),
+        blankLabels: [] as string[],
+        previewParagraphs: [] as string[],
+      };
+    }
+
+    const dl = await supabaseAdmin.storage
+      .from(CUSTOM_TEMPLATES_BUCKET)
+      .download(tplRow.attachment_path);
+    if (dl.error || !dl.data) {
+      throw new Error(`Could not read stored template file: ${dl.error?.message ?? "Missing object"}`);
+    }
+
+    const rawBytes = new Uint8Array(await dl.data.arrayBuffer());
+    if (tplRow.attachment_format === "docx") {
+      const existingMappings = Array.isArray(tplRow.field_mappings)
+        ? (tplRow.field_mappings as DocxFieldMappingRule[])
+        : [];
+      const docInfo = extractDocxPlaceholders(rawBytes, existingMappings);
+      const suggestedMappings =
+        existingMappings.length > 0 ? existingMappings : docInfo.blankDetection.suggestedMappings;
+      return {
+        detectedPlaceholders: [
+          ...new Set([
+            ...docInfo.detectedPlaceholders,
+            ...suggestedMappings.filter((m) => m.enabled).map((m) => m.placeholder),
+          ]),
+        ],
+        suggestedMappings,
+        hasUnmappedBlanks: docInfo.blankDetection.hasUnmappedBlanks,
+        isLikelyRelievingTemplate: docInfo.blankDetection.isLikelyRelievingTemplate,
+        blankLabels: docInfo.blankDetection.blankLabels,
+        previewParagraphs: docInfo.previewParagraphs,
+      };
+    }
+
+    const pdfInfo = await inspectPdfTemplate(rawBytes);
+    return {
+      detectedPlaceholders: pdfInfo.detectedPlaceholders,
+      suggestedMappings: [] as DocxFieldMappingRule[],
+      hasUnmappedBlanks: false,
+      isLikelyRelievingTemplate: isRelievingStyleCustomTemplate({
+        templateName: tplRow.name,
+        attachmentFilename: tplRow.attachment_filename,
+        purposeCategory: tplRow.purpose_category,
+      }),
+      blankLabels: [] as string[],
+      previewParagraphs: [] as string[],
+    };
+  });
+
+/**
+ * 6. Previews a Custom Email Template (subject, HTML, text, and the ACTUAL generated DOCX/PDF attachment)
  * against a selected authorized employee WITHOUT sending any email.
  */
 export const previewCustomEmailTemplate = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .validator((input: { templateId: string; sampleRecipientRecordId?: string | null }) => {
-    if (!input?.templateId) throw new Error("Custom template ID is required.");
-    return input;
-  })
+  .validator(
+    (input: {
+      templateId: string;
+      sampleRecipientRecordId?: string | null | undefined;
+      overrideFieldMappings?: DocxFieldMappingRule[] | undefined;
+      overrideDocumentMode?: CustomDocumentMode | undefined;
+    }) => {
+      if (!input?.templateId) throw new Error("Custom template ID is required.");
+      return input;
+    },
+  )
   .handler(async ({ data, context }) => {
     const actor = await loadActor(context.supabase, context.userId);
     const access = resolveEmailCenterAccessPolicy(actor.roles, actor.permissions);
@@ -940,15 +1141,31 @@ export const previewCustomEmailTemplate = createServerFn({ method: "POST" })
     if (!tplRow) throw new Error("Custom email template not found.");
 
     const template = mapCustomTemplateRow(tplRow, access.canAccessPrivateTemplateFiles);
+    if (data.overrideDocumentMode) {
+      template.documentMode = data.overrideDocumentMode;
+    }
+
+    const isRelievingTemplate = isRelievingStyleCustomTemplate({
+      templateName: template.name,
+      attachmentFilename: template.attachmentFilename,
+      purposeCategory: template.purposeCategory,
+      requiresRelievingApproval: template.requiresRelievingApproval,
+    });
+
+    let matchedRecipient: EmailCenterRecipientItem | null = null;
     let variables: Record<string, string> = {
       employee_name: "Sample Employee",
       employee_id: "TAS-REC-0001",
       designation: "AI Data Associate",
       joining_date: "2 Jul 2026",
       last_working_date: "30 Oct 2026",
+      relieving_date: "30 Oct 2026",
       work_type: "full_time",
       employment_category: "full_time",
+      legal_employer: "Learning Paths Technologies LLP",
       company_name: "Learning Paths Technologies LLP",
+      signatory_name: "K. Spandana",
+      signatory_title: "HR - Director",
       issue_date: formatLetterDate(new Date().toISOString().slice(0, 10)),
     };
 
@@ -956,7 +1173,8 @@ export const previewCustomEmailTemplate = createServerFn({ method: "POST" })
       const { pool } = await loadRecipientPoolForActor(context.supabase, access);
       const match = pool.find((r) => r.recordId === data.sampleRecipientRecordId);
       if (match) {
-        variables = buildRecipientPlaceholderVariables(match);
+        matchedRecipient = match;
+        variables = buildRecipientPlaceholderVariables(match, { isRelievingTemplate });
       }
     }
 
@@ -968,9 +1186,13 @@ export const previewCustomEmailTemplate = createServerFn({ method: "POST" })
     });
 
     const missingSet = new Set<string>(renderedEmail.missingPlaceholders);
+    let unresolvedPlaceholders: string[] = [];
+    let remainingBlankFields: string[] = [];
     let docxParagraphs: string[] = [];
     let personalizedAttachmentBase64: string | null = null;
     let pdfWarning: string | null = null;
+    let effectiveMappings = data.overrideFieldMappings ?? template.fieldMappings;
+    let isVerifiedClean = true;
 
     if (access.canAccessPrivateTemplateFiles && tplRow.attachment_path) {
       const dl = await supabaseAdmin.storage
@@ -980,16 +1202,36 @@ export const previewCustomEmailTemplate = createServerFn({ method: "POST" })
       if (!dl.error && dl.data) {
         const rawBytes = new Uint8Array(await dl.data.arrayBuffer());
         if (template.attachmentFormat === "docx") {
-          const personalized = personalizeDocxBuffer(rawBytes, variables);
-          for (const m of personalized.missingPlaceholders) missingSet.add(m);
-          docxParagraphs = personalized.previewParagraphs;
-          personalizedAttachmentBase64 = Buffer.from(personalized.buffer).toString("base64");
+          const docInspect = extractDocxPlaceholders(rawBytes, effectiveMappings);
+          if (
+            effectiveMappings.length === 0 &&
+            docInspect.blankDetection.isLikelyRelievingTemplate &&
+            docInspect.blankDetection.suggestedMappings.length > 0
+          ) {
+            effectiveMappings = docInspect.blankDetection.suggestedMappings;
+          }
+
+          if (template.documentMode === "static" && !isRelievingTemplate) {
+            docxParagraphs = docInspect.previewParagraphs;
+            personalizedAttachmentBase64 = Buffer.from(rawBytes).toString("base64");
+          } else {
+            const personalized = personalizeDocxBuffer(rawBytes, variables, {
+              fieldMappings: effectiveMappings,
+            });
+            for (const m of personalized.missingPlaceholders) missingSet.add(m);
+            unresolvedPlaceholders = personalized.unresolvedPlaceholders;
+            remainingBlankFields = personalized.remainingBlankFields;
+            isVerifiedClean = personalized.isVerifiedClean;
+            docxParagraphs = personalized.previewParagraphs;
+            personalizedAttachmentBase64 = Buffer.from(personalized.buffer).toString("base64");
+          }
         } else if (template.attachmentFormat === "pdf") {
           const info = await inspectPdfTemplate(rawBytes);
           pdfWarning = info.warning;
           if (info.mode === "fillable") {
             const filled = await personalizeFillablePdf(rawBytes, variables);
             for (const m of filled.missingPlaceholders) missingSet.add(m);
+            isVerifiedClean = filled.missingPlaceholders.length === 0;
             personalizedAttachmentBase64 = Buffer.from(filled.buffer).toString("base64");
           } else {
             personalizedAttachmentBase64 = Buffer.from(rawBytes).toString("base64");
@@ -998,17 +1240,61 @@ export const previewCustomEmailTemplate = createServerFn({ method: "POST" })
       }
     }
 
+    const resolvedAttachmentFilename =
+      template.attachmentFormat !== "none"
+        ? buildPersonalizedAttachmentFilename({
+            employeeFullName: matchedRecipient?.fullName ?? variables["employee_name"] ?? "Employee",
+            templateDisplayName: template.name,
+            format: template.attachmentFormat,
+            documentMode: isRelievingTemplate ? "personalized" : template.documentMode,
+            staticOriginalFilename: template.attachmentFilename,
+          })
+        : null;
+
+    const validation = matchedRecipient
+      ? evaluateCustomTemplateRecipientReadiness({
+          template: {
+            ...template,
+            fieldMappings: effectiveMappings,
+          },
+          recipient: matchedRecipient,
+          defaultEmailMode: template.defaultEmailMode,
+          attachmentPlaceholders: [
+            ...new Set([
+              ...template.detectedPlaceholders,
+              ...effectiveMappings.filter((m) => m.enabled).map((m) => m.placeholder),
+            ]),
+          ],
+          attachmentHasUnmappedBlanks: remainingBlankFields.length > 0 && effectiveMappings.length === 0,
+        })
+      : null;
+
     return {
-      template,
+      template: {
+        ...template,
+        fieldMappings: effectiveMappings,
+      },
       subject: renderedEmail.subject,
       bodyHtml: renderedEmail.bodyHtml,
       bodyText: renderedEmail.bodyText,
-      detectedPlaceholders: template.detectedPlaceholders,
+      detectedPlaceholders: [
+        ...new Set([
+          ...template.detectedPlaceholders,
+          ...effectiveMappings.filter((m) => m.enabled).map((m) => m.placeholder),
+        ]),
+      ],
       missingPlaceholders: [...missingSet],
+      unresolvedPlaceholders,
+      remainingBlankFields,
+      isVerifiedClean: isVerifiedClean && missingSet.size === 0,
+      resolvedAttachmentFilename,
+      resolvedVariables: variables,
+      validation,
       pdfMode: template.pdfMode,
       pdfWarning,
       docxParagraphs,
       personalizedAttachmentBase64,
+      suggestedMappings: effectiveMappings,
     };
   });
 
@@ -1083,6 +1369,7 @@ export const createBulkDispatchBatch = createServerFn({ method: "POST" })
       data.dispatchKind === "relieving_bulk" ? "employee_relieving_letter" : null;
     let customTemplate: CustomEmailTemplateRecord | null = null;
     let attachmentPlaceholders: string[] = [];
+    let attachmentHasUnmappedBlanks = false;
 
     if (data.dispatchKind === "custom_template_bulk") {
       if (!data.customTemplateId) {
@@ -1102,7 +1389,54 @@ export const createBulkDispatchBatch = createServerFn({ method: "POST" })
       }
       customTemplate = mapCustomTemplateRow(tplRow, true);
       templateName = customTemplate.name;
-      attachmentPlaceholders = customTemplate.detectedPlaceholders;
+
+      // Inspect stored DOCX if needed so pre-mapped or unmapped blanks are strictly enforced
+      if (customTemplate.attachmentFormat === "docx" && tplRow.attachment_path) {
+        const dl = await supabaseAdmin.storage
+          .from(CUSTOM_TEMPLATES_BUCKET)
+          .download(tplRow.attachment_path);
+        if (dl.error || !dl.data) {
+          throw new Error(
+            `Stored Word template "${customTemplate.attachmentFilename}" could not be loaded from private storage.`,
+          );
+        }
+        const rawBytes = new Uint8Array(await dl.data.arrayBuffer());
+        const docInfo = extractDocxPlaceholders(rawBytes, customTemplate.fieldMappings);
+        if (
+          customTemplate.fieldMappings.length === 0 &&
+          docInfo.blankDetection.isLikelyRelievingTemplate &&
+          docInfo.blankDetection.suggestedMappings.length > 0
+        ) {
+          customTemplate.fieldMappings = docInfo.blankDetection.suggestedMappings;
+          customTemplate.requiresRelievingApproval = true;
+          customTemplate.documentMode = "personalized";
+        }
+        const enabledMapped = customTemplate.fieldMappings
+          .filter((m) => m.enabled)
+          .map((m) => m.placeholder);
+        attachmentPlaceholders = [...new Set([...docInfo.detectedPlaceholders, ...enabledMapped])];
+        attachmentHasUnmappedBlanks =
+          docInfo.blankDetection.hasUnmappedBlanks && enabledMapped.length === 0;
+      } else {
+        attachmentPlaceholders = customTemplate.detectedPlaceholders;
+      }
+
+      const isRelievingCustom = isRelievingStyleCustomTemplate({
+        templateName: customTemplate.name,
+        attachmentFilename: customTemplate.attachmentFilename,
+        purposeCategory: customTemplate.purposeCategory,
+        requiresRelievingApproval: customTemplate.requiresRelievingApproval,
+      });
+      if (isRelievingCustom && customTemplate.documentMode === "static") {
+        throw new Error(
+          "Relieving / Experience templates cannot be dispatched in STATIC DOCUMENT mode. Switch to PERSONALIZED DOCUMENT mode.",
+        );
+      }
+      if (attachmentHasUnmappedBlanks) {
+        throw new Error(
+          "This uploaded Word template has unmapped blank fields. Inspect & enable field mappings in Upload & Compose before sending.",
+        );
+      }
     }
 
     interface PreparedItem {
@@ -1202,6 +1536,7 @@ export const createBulkDispatchBatch = createServerFn({ method: "POST" })
           defaultEmailMode: data.defaultEmailMode,
           overrideMode,
           attachmentPlaceholders,
+          attachmentHasUnmappedBlanks,
         });
 
         if (!evalRes.ready || !evalRes.emailResolution.resolvedEmail) {
@@ -1213,7 +1548,7 @@ export const createBulkDispatchBatch = createServerFn({ method: "POST" })
           continue;
         }
 
-        const vars = buildRecipientPlaceholderVariables(recipient);
+        const vars = evalRes.resolvedVariables;
         const rendered = renderCustomEmailContent({
           subjectTemplate: customTemplate.subjectTemplate,
           bodyHtmlTemplate: customTemplate.bodyHtmlTemplate,
@@ -1221,22 +1556,19 @@ export const createBulkDispatchBatch = createServerFn({ method: "POST" })
           variables: vars,
         });
 
-        const safeName = recipient.fullName.replace(/[^a-zA-Z0-9_-]+/g, "_");
-        const attName = customTemplate.attachmentFilename
-          ? `${customTemplate.attachmentFilename.replace(/\.[^.]+$/, "")}_${safeName}.${customTemplate.attachmentFormat}`
-          : null;
-
         candidatesToQueue.push({
           recipientRecordId: recipient.recordId,
           profileId: recipient.profileId,
-          relievingCaseId: null,
+          relievingCaseId: evalRes.isRelievingTemplate
+            ? (recipient.relievingCase?.id ?? null)
+            : null,
           employeeCode: recipient.employeeCode || recipient.historicalRecordId,
           recipientName: recipient.fullName,
           emailMode: evalRes.emailResolution.emailMode,
           resolvedEmail: evalRes.emailResolution.resolvedEmail,
           resolvedSubject: rendered.subject,
           resolvedVariables: vars,
-          attachmentName: attName,
+          attachmentName: evalRes.resolvedFilename,
         });
       }
     }
@@ -1465,7 +1797,12 @@ export const processBulkDispatchChunk = createServerFn({ method: "POST" })
         let subject = item.resolved_subject;
         let bodyHtml = "";
         let bodyText = "";
-        const attachments: { filename: string; content: Buffer; contentType: string }[] = [];
+        const attachments: {
+          filename: string;
+          content: Buffer;
+          contentType: string;
+          contentDisposition?: "attachment" | "inline";
+        }[] = [];
 
         if (batchRow.dispatch_kind === "relieving_bulk") {
           const rc = item.relieving_case_id ? rcMap.get(item.relieving_case_id) : null;
@@ -1532,37 +1869,116 @@ export const processBulkDispatchChunk = createServerFn({ method: "POST" })
           bodyText = renderedCustom.bodyText;
 
           if (customAttachmentBytes) {
+            const isRelievingCustom = isRelievingStyleCustomTemplate({
+              templateName: customTemplateRow.name,
+              attachmentFilename: customTemplateRow.attachment_filename,
+              purposeCategory: customTemplateRow.purpose_category,
+              requiresRelievingApproval: Boolean(customTemplateRow.requires_relieving_approval),
+            });
+            const effectiveDocMode: CustomDocumentMode = isRelievingCustom
+              ? "personalized"
+              : customTemplateRow.document_mode === "static"
+                ? "static"
+                : "personalized";
+
             if (customTemplateRow.attachment_format === "docx") {
-              const personalized = personalizeDocxBuffer(customAttachmentBytes, vars);
-              if (personalized.missingPlaceholders.length > 0) {
-                throw new Error(
-                  `Missing DOCX placeholder values: ${personalized.missingPlaceholders.join(", ")}`,
-                );
-              }
-              attachments.push({
-                filename: item.attachment_name || customTemplateRow.attachment_filename || "Document.docx",
-                content: Buffer.from(personalized.buffer),
-                contentType:
-                  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+              // Clone bytes per recipient so no mutable template state crosses recipients
+              const freshDocxBytes = new Uint8Array(customAttachmentBytes);
+              const savedMappings = Array.isArray(customTemplateRow.field_mappings)
+                ? (customTemplateRow.field_mappings as DocxFieldMappingRule[])
+                : [];
+              const blankScan =
+                savedMappings.length === 0
+                  ? detectUnmappedBlankFieldsInDocx(freshDocxBytes)
+                  : null;
+              const effectiveMappings =
+                savedMappings.length > 0
+                  ? savedMappings
+                  : blankScan?.isLikelyRelievingTemplate
+                    ? blankScan.suggestedMappings
+                    : [];
+
+              const finalAttachmentName = buildPersonalizedAttachmentFilename({
+                employeeFullName: item.recipient_name,
+                templateDisplayName: customTemplateRow.name,
+                format: "docx",
+                documentMode: effectiveDocMode,
+                staticOriginalFilename: customTemplateRow.attachment_filename,
               });
+
+              if (effectiveDocMode === "static") {
+                if (isRelievingCustom) {
+                  throw new Error(
+                    "Blocked: Relieving Word document cannot be sent as a static unfilled attachment.",
+                  );
+                }
+                attachments.push({
+                  filename: finalAttachmentName,
+                  content: Buffer.from(freshDocxBytes),
+                  contentType:
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                  contentDisposition: "attachment",
+                });
+              } else {
+                const personalized = personalizeDocxBuffer(freshDocxBytes, vars, {
+                  fieldMappings: effectiveMappings,
+                });
+                if (personalized.buffer.byteLength === 0) {
+                  throw new Error("Generated personalized DOCX buffer is empty.");
+                }
+                if (personalized.missingPlaceholders.length > 0) {
+                  throw new Error(
+                    `Blocked blank DOCX fields — missing values for: ${personalized.missingPlaceholders.join(", ")}`,
+                  );
+                }
+                if (personalized.unresolvedPlaceholders.length > 0) {
+                  throw new Error(
+                    `Blocked unresolved placeholders in DOCX: ${personalized.unresolvedPlaceholders.join(", ")}`,
+                  );
+                }
+                if (personalized.remainingBlankFields.length > 0) {
+                  throw new Error(
+                    `Blocked unfilled relieving fields in DOCX: ${personalized.remainingBlankFields.join(", ")}`,
+                  );
+                }
+                attachments.push({
+                  filename: finalAttachmentName,
+                  content: Buffer.from(personalized.buffer),
+                  contentType:
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                  contentDisposition: "attachment",
+                });
+              }
             } else if (customTemplateRow.attachment_format === "pdf") {
+              const freshPdfBytes = new Uint8Array(customAttachmentBytes);
+              const finalPdfName = buildPersonalizedAttachmentFilename({
+                employeeFullName: item.recipient_name,
+                templateDisplayName: customTemplateRow.name,
+                format: "pdf",
+                documentMode:
+                  customTemplateRow.pdf_mode === "fillable" ? "personalized" : effectiveDocMode,
+                staticOriginalFilename: customTemplateRow.attachment_filename,
+              });
+
               if (customTemplateRow.pdf_mode === "fillable") {
-                const filled = await personalizeFillablePdf(customAttachmentBytes, vars);
+                const filled = await personalizeFillablePdf(freshPdfBytes, vars);
                 if (filled.missingPlaceholders.length > 0) {
                   throw new Error(
                     `Missing PDF field values: ${filled.missingPlaceholders.join(", ")}`,
                   );
                 }
                 attachments.push({
-                  filename: item.attachment_name || customTemplateRow.attachment_filename || "Document.pdf",
+                  filename: finalPdfName,
                   content: Buffer.from(filled.buffer),
                   contentType: "application/pdf",
+                  contentDisposition: "attachment",
                 });
               } else {
                 attachments.push({
-                  filename: customTemplateRow.attachment_filename || "Attachment.pdf",
-                  content: Buffer.from(customAttachmentBytes),
+                  filename: finalPdfName,
+                  content: Buffer.from(freshPdfBytes),
                   contentType: "application/pdf",
+                  contentDisposition: "attachment",
                 });
               }
             }

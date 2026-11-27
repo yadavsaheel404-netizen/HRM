@@ -9,6 +9,7 @@ import {
   assertNoNonPublicLinks,
   buildPortalLink,
   resolveEmailPortalUrlFromEnv,
+  resolvePasswordResetRedirectUrlFromEnv,
 } from "../app-url";
 
 const BRAND_LOGO_CID = "the-ai-school-logo@theaischool.co";
@@ -189,6 +190,17 @@ export function resolveSupabaseAuthRedirectUrl(
   // Every server-generated auth redirect ends up inside an email, so it uses the
   // same strict canonical-URL rules (HTTPS, public host, no header derivation).
   return buildPortalLink(resolveEmailPortalUrlFromEnv(env), path);
+}
+
+/**
+ * Resolves the Forgot Password `redirectTo` URL from server config.
+ * Enforces canonical HTTPS in production while allowing explicit `LOCAL_AUTH_REDIRECT_ORIGIN`
+ * only in local development when `PUBLIC_APP_URL` is unset.
+ */
+export function resolvePasswordResetRedirectUrl(
+  env: Record<string, string | undefined> = getRuntimeServerEnv(),
+): string {
+  return resolvePasswordResetRedirectUrlFromEnv(env);
 }
 
 /** Canonical HTTPS portal origin for outbound email; throws if misconfigured. */

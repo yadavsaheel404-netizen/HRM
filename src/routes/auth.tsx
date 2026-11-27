@@ -3,6 +3,8 @@ import { useEffect, useState } from "react";
 import { CalendarCheck, ClipboardList, Eye, EyeOff, TrendingUp } from "lucide-react";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
+import { isRecoveryAuthLocation } from "@/lib/app-url";
+import { requestPasswordReset } from "@/lib/auth-recovery.functions";
 import { Logo } from "@/components/brand/logo";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -47,9 +49,26 @@ function AuthPage() {
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data }) => {
-      if (data.session) navigate({ to: "/dashboard" });
+    if (isRecoveryAuthLocation(window.location)) {
+      window.location.replace(`/auth/reset-password${window.location.search}${window.location.hash}`);
+      return;
+    }
+
+    const { data: sub } = supabase.auth.onAuthStateChange((event) => {
+      if (event === "PASSWORD_RECOVERY") {
+        navigate({ to: "/auth/reset-password", replace: true });
+      }
     });
+
+    supabase.auth.getSession().then(({ data }) => {
+      if (data.session && !isRecoveryAuthLocation(window.location)) {
+        navigate({ to: "/dashboard" });
+      }
+    });
+
+    return () => {
+      sub.subscription.unsubscribe();
+    };
   }, [navigate]);
 
   function switchMode(nextMode: AuthMode) {
@@ -78,19 +97,20 @@ function AuthPage() {
     setFormError(null);
     setStatusMessage(null);
     setBusy(true);
-    const { error } = await supabase.auth.resetPasswordForEmail(email.trim(), {
-      redirectTo: `${window.location.origin}/auth/reset-password`,
-    });
-    setBusy(false);
-    if (error) {
-      setFormError(error.message);
-      toast.error(error.message);
-      return;
+    try {
+      await requestPasswordReset({ data: { email: email.trim() } });
+      const msg = "If that work email is registered, a password reset link has been sent.";
+      toast.success(msg);
+      setMode("password");
+      setStatusMessage(msg);
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : "Could not send password reset email right now.";
+      setFormError(msg);
+      toast.error(msg);
+    } finally {
+      setBusy(false);
     }
-    const msg = "If that work email is registered, a password reset link has been sent.";
-    toast.success(msg);
-    setMode("password");
-    setStatusMessage(msg);
   }
 
   return (

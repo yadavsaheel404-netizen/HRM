@@ -47,8 +47,9 @@ function buildMinimalDocx(options?: {
   <w:body>
     <w:p><w:r><w:t>Dear {{</w:t></w:r><w:r><w:t>employee_name</w:t></w:r><w:r><w:t>}},</w:t></w:r></w:p>
     <w:p><w:r><w:t>Employee ID: {{employee_id}} | Designation: {{designation}}</w:t></w:r></w:p>
-    <w:p><w:t>Joining: {{joining_date}} | Last Working Day: {{last_working_date}}</w:t></w:p>
-    <w:p><w:t>Type: {{work_type}} / {{employment_category}} | Org: {{company_name}} | Date: {{issue_date}}</w:t></w:p>
+    <w:p><w:t>Joining: {{joining_date}} | Last Working Day: {{last_working_date}} | Relieving: {{relieving_date}}</w:t></w:p>
+    <w:p><w:t>Type: {{work_type}} / {{employment_category}} | Org: {{company_name}} | Entity: {{legal_employer}} | Date: {{issue_date}}</w:t></w:p>
+    <w:p><w:t>Signatory: {{signatory_name}} ({{signatory_title}})</w:t></w:p>
     <w:tbl><w:tr><w:tc><w:p><w:t>Table Cell</w:t></w:p></w:tc></w:tr></w:tbl>
   </w:body>
 </w:document>`;
@@ -158,6 +159,9 @@ function makeCustomTemplate(
     attachmentSizeBytes: 2048,
     attachmentSha256: "abc",
     pdfMode: null,
+    documentMode: "personalized",
+    fieldMappings: [],
+    requiresRelievingApproval: false,
     detectedPlaceholders: ["employee_name", "employee_id", "designation"],
     recipientType: "all_records",
     defaultEmailMode: "personal",

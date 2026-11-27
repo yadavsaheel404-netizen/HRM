@@ -1154,10 +1154,13 @@ export const setEmployeeTemporaryPassword = createServerFn({ method: "POST" })
     }
 
     // Flag that the user must change password on their next login
-    await supabaseAdmin
+    const { error: flagError } = await supabaseAdmin
       .from("profiles")
       .update({ must_change_password: true } as never)
       .eq("id", data.userId);
+    if (flagError) {
+      throw new Error(`Password updated, but failed to enforce must_change_password: ${flagError.message}`);
+    }
 
     // Write audit log WITHOUT recording the password value
     const { writeAudit } = await import("./audit.server");

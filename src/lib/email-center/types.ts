@@ -1,16 +1,47 @@
 export const CUSTOM_TEMPLATE_PLACEHOLDERS = [
+  "issue_date",
   "employee_name",
   "employee_id",
   "designation",
   "joining_date",
   "last_working_date",
+  "relieving_date",
+  "legal_employer",
+  "signatory_name",
+  "signatory_title",
   "work_type",
   "employment_category",
   "company_name",
-  "issue_date",
 ] as const;
 
 export type CustomTemplatePlaceholderKey = (typeof CUSTOM_TEMPLATE_PLACEHOLDERS)[number];
+
+export type CustomDocumentMode = "static" | "personalized";
+
+export type CustomRecipientValidationStatus =
+  | "ready"
+  | "missing_information"
+  | "approval_pending"
+  | "invalid_template"
+  | "already_sent"
+  | "blocked";
+
+export interface DocxFieldMappingRule {
+  id: string;
+  placeholder: CustomTemplatePlaceholderKey;
+  label: string;
+  paragraphIndex: number;
+  anchorSnippet: string;
+  strategy:
+    | "date_line"
+    | "dear_line"
+    | "legal_employer_in_cert"
+    | "designation_in_cert"
+    | "joining_date_in_cert"
+    | "last_working_date_in_cert"
+    | "relieving_effective_line";
+  enabled: boolean;
+}
 
 export const STATIC_PDF_WARNING_MESSAGE =
   "This PDF is a static attachment. Employee-specific placeholders are not available.";
@@ -167,6 +198,9 @@ export interface CustomEmailTemplateRecord {
   attachmentSizeBytes: number | null;
   attachmentSha256: string | null;
   pdfMode: CustomPdfMode;
+  documentMode: CustomDocumentMode;
+  fieldMappings: DocxFieldMappingRule[];
+  requiresRelievingApproval: boolean;
   detectedPlaceholders: string[];
   recipientType: CustomTemplateRecipientType;
   defaultEmailMode: RecipientEmailMode;
@@ -190,6 +224,8 @@ export interface CustomEmailTemplateVersionRecord {
   subjectTemplate: string;
   attachmentFilename: string | null;
   attachmentFormat: CustomTemplateFormat;
+  documentMode: CustomDocumentMode;
+  fieldMappings: DocxFieldMappingRule[];
   detectedPlaceholders: string[];
   status: string;
   changedBy: string | null;

@@ -9,7 +9,10 @@ import {
   CUSTOM_TEMPLATE_MAX_BYTES,
   CUSTOM_TEMPLATE_PLACEHOLDERS,
   STATIC_PDF_WARNING_MESSAGE,
+  type CustomDocumentMode,
   type CustomEmailTemplateRecord,
+  type CustomRecipientValidationStatus,
+  type DocxFieldMappingRule,
   type EmailCenterAccessPolicy,
   type EmailCenterRecipientItem,
   type RecipientEmailMode,
@@ -83,6 +86,60 @@ export function sanitizeStorageFileName(fileName: string): string {
     .replace(/_+/g, "_")
     .replace(/^\.+/, "");
   return cleaned || "template.bin";
+}
+
+function sanitizeAttachmentLabelPart(value: string, fallback: string): string {
+  const noTraversal = value.replace(/\.\./g, " ").replace(/[\\/]/g, " ");
+  const cleaned = noTraversal
+    .replace(/[\x00-\x1f<>:"|?*]/g, "")
+    .replace(/\s+/g, " ")
+    .replace(/^[\s.]+|[\s.]+$/g, "");
+  return cleaned || fallback;
+}
+
+/**
+ * Generates clean personalized attachment filenames matching:
+ * `Employee Full Name - Template Display Name.docx` (or `.pdf`)
+ * Falls back to sanitized static filename only when `documentMode === "static"`.
+ */
+export function buildPersonalizedAttachmentFilename(input: {
+  employeeFullName: string;
+  templateDisplayName: string;
+  format: "docx" | "pdf";
+  documentMode?: CustomDocumentMode | undefined;
+  staticOriginalFilename?: string | null | undefined;
+}): string {
+  const ext = input.format === "pdf" ? "pdf" : "docx";
+  if (input.documentMode === "static" && input.staticOriginalFilename) {
+    const baseRaw = input.staticOriginalFilename.split(/[\\/]/).pop() ?? "";
+    const noExt = baseRaw.replace(/\.[^.]+$/, "");
+    const safeStatic = sanitizeAttachmentLabelPart(noExt, "Attachment");
+    return `${safeStatic}.${ext}`;
+  }
+
+  const empPart = sanitizeAttachmentLabelPart(input.employeeFullName, "Employee");
+  const rawTplNoExt = input.templateDisplayName.replace(/\.(docx|pdf)$/i, "");
+  const tplPart = sanitizeAttachmentLabelPart(rawTplNoExt, "HR Document");
+  return `${empPart} - ${tplPart}.${ext}`;
+}
+
+export function isRelievingStyleCustomTemplate(input: {
+  templateName?: string | null | undefined;
+  attachmentFilename?: string | null | undefined;
+  purposeCategory?: string | null | undefined;
+  previewText?: string | null | undefined;
+  requiresRelievingApproval?: boolean | undefined;
+}): boolean {
+  if (input.requiresRelievingApproval) return true;
+  const hay = [
+    input.templateName ?? "",
+    input.attachmentFilename ?? "",
+    input.purposeCategory ?? "",
+    input.previewText ?? "",
+  ]
+    .join(" ")
+    .toLowerCase();
+  return /reliev|experience\s+letter|effective\s+close\s+of\s+business/.test(hay);
 }
 
 export function isValidSingleEmail(email: string | null | undefined): boolean {
@@ -284,27 +341,140 @@ export function validateUploadedTemplateFile(input: {
   };
 }
 
+interface TextSplice {
+  start: number;
+  end: number;
+  replacement: string;
+}
+
+function computeParagraphMappingSplices(
+  concatText: string,
+  paragraphIndex: number,
+  rules: DocxFieldMappingRule[],
+): TextSplice[] {
+  const splices: TextSplice[] = [];
+
+  for (const rule of rules) {
+    if (!rule.enabled) continue;
+    if (rule.paragraphIndex !== paragraphIndex) continue;
+    if (
+      rule.anchorSnippet &&
+      !concatText.toLowerCase().includes(rule.anchorSnippet.toLowerCase())
+    ) {
+      continue;
+    }
+
+    const token = `{{${rule.placeholder}}}`;
+    if (concatText.includes(token)) continue;
+
+    if (rule.strategy === "date_line") {
+      const m = /^(Date\s*:)([\s_.\-\[\]]*)$/i.exec(concatText.trimEnd());
+      if (m) {
+        const labelEnd = m[1]!.length;
+        splices.push({ start: labelEnd, end: concatText.length, replacement: ` ${token}` });
+      }
+    } else if (rule.strategy === "dear_line") {
+      const m = /^(Dear\b)([\s_.\-\[\],]*)$/i.exec(concatText);
+      if (m) {
+        const dearEnd = m[1]!.length;
+        const hasComma = (m[2] ?? "").includes(",");
+        splices.push({
+          start: dearEnd,
+          end: concatText.length,
+          replacement: hasComma ? ` ${token},` : ` ${token},`,
+        });
+      }
+    } else if (rule.strategy === "legal_employer_in_cert") {
+      const m = /(\bassociated\s+with\s+)([A-Za-z0-9 &.,'()_.\-\[\]]+?)(\s+\bas\b)/i.exec(
+        concatText,
+      );
+      if (m && m.index !== undefined) {
+        const slotStart = m.index + m[1]!.length;
+        const slotEnd = slotStart + m[2]!.length;
+        splices.push({ start: slotStart, end: slotEnd, replacement: token });
+      }
+    } else if (rule.strategy === "designation_in_cert") {
+      const m = /(\bas\s+an?\s+)(.*?)(\s+\bfrom\b)/i.exec(concatText);
+      if (m && m.index !== undefined) {
+        const slotStart = m.index + m[1]!.length;
+        const slotEnd = slotStart + m[2]!.length;
+        splices.push({ start: slotStart, end: slotEnd, replacement: token });
+      }
+    } else if (rule.strategy === "joining_date_in_cert") {
+      const m = /(\bfrom\s)([_.\-\[\]\sA-Za-z0-9/]*?)(\s*\bto\b)/i.exec(concatText);
+      if (m && m.index !== undefined) {
+        const slotStart = m.index + m[1]!.length;
+        const slotEnd = slotStart + m[2]!.length;
+        const rep = m[3]!.startsWith(" ") ? token : `${token} `;
+        splices.push({ start: slotStart, end: slotEnd, replacement: rep });
+      }
+    } else if (rule.strategy === "last_working_date_in_cert") {
+      const m = /(\bfrom\b[^\n]*?\bto\s)([_.\-\[\]\sA-Za-z0-9/]*?)([.,]?)\s*$/i.exec(
+        concatText,
+      );
+      if (m && m.index !== undefined) {
+        const slotStart = m.index + m[1]!.length;
+        const trailingPunct = m[3] ?? "";
+        const slotEnd = concatText.length - trailingPunct.length;
+        splices.push({ start: slotStart, end: Math.max(slotStart, slotEnd), replacement: token });
+      }
+    } else if (rule.strategy === "relieving_effective_line") {
+      const m = /(effective\s+close\s+of\s+business\s+on\b)([\s_.\-\[\]A-Za-z0-9/]*?)([.,]?)\s*$/i.exec(
+        concatText,
+      );
+      if (m && m.index !== undefined) {
+        const slotStart = m.index + m[1]!.length;
+        const slotEnd = slotStart + m[2]!.length;
+        const trailingPunct = m[3] ?? ".";
+        splices.push({
+          start: slotStart,
+          end: concatText.length,
+          replacement: ` ${token}${trailingPunct || "."}`,
+        });
+      }
+    }
+  }
+
+  // Sort non-overlapping splices from left to right and drop overlaps cleanly
+  splices.sort((a, b) => a.start - b.start || a.end - b.end);
+  const clean: TextSplice[] = [];
+  let lastEnd = -1;
+  for (const s of splices) {
+    if (s.start >= lastEnd) {
+      clean.push(s);
+      lastEnd = s.end;
+    }
+  }
+  return clean;
+}
+
 /**
- * Extracts coalesced paragraph text and applies optional placeholder replacements inside a single
- * WordprocessingML XML file while preserving split `<w:t>` runs and surrounding `<w:rPr>` formatting.
+ * Extracts coalesced paragraph text and applies optional field-mapping + placeholder replacements
+ * inside a WordprocessingML XML file while preserving split `<w:t>` runs and `<w:rPr>` formatting.
  */
 function transformWordXmlParagraphs(
   xmlText: string,
   variables?: Record<string, string>,
+  fieldMappings?: DocxFieldMappingRule[],
 ): {
   updatedXml: string;
   paragraphs: string[];
   detectedPlaceholders: string[];
   replacedPlaceholders: string[];
   missingPlaceholders: string[];
+  unresolvedPlaceholders: string[];
 } {
   const paragraphs: string[] = [];
   const detectedSet = new Set<string>();
   const replacedSet = new Set<string>();
   const missingSet = new Set<string>();
+  const unresolvedSet = new Set<string>();
 
   const pRegex = /<w:p\b[^>]*>[\s\S]*?<\/w:p>/g;
+  let paragraphIndex = -1;
+
   const updatedXml = xmlText.replace(pRegex, (pBlock) => {
+    paragraphIndex++;
     interface WtSpan {
       fullStart: number;
       fullEnd: number;
@@ -344,12 +514,69 @@ function transformWordXmlParagraphs(
       }
     }
 
-    const trimmedParagraph = concatText.trim();
-    if (trimmedParagraph) {
-      paragraphs.push(trimmedParagraph);
+    if (spans.length === 0) {
+      return pBlock;
     }
 
-    // Detect all placeholders in coalesced paragraph text (handles split Word runs!)
+    // Apply controlled field mappings ONLY on matching paragraphIndex slots
+    let updatedTexts = spans.map((s) => s.decoded);
+    const activeMappings = (fieldMappings ?? []).filter((r) => r.enabled);
+    const mappingSplices =
+      activeMappings.length > 0
+        ? computeParagraphMappingSplices(concatText, paragraphIndex, activeMappings)
+        : [];
+
+    if (mappingSplices.length > 0) {
+      for (let mi = mappingSplices.length - 1; mi >= 0; mi--) {
+        const splice = mappingSplices[mi]!;
+        if (splice.start === splice.end && splice.start >= concatText.length) {
+          const lastIdx = spans.length - 1;
+          updatedTexts[lastIdx] = `${updatedTexts[lastIdx] ?? ""}${splice.replacement}`;
+          continue;
+        }
+
+        let inserted = false;
+        for (let si = 0; si < spans.length; si++) {
+          const span = spans[si]!;
+          const overlapsRange =
+            splice.start < splice.end
+              ? span.concatEnd > splice.start && span.concatStart < splice.end
+              : splice.start >= span.concatStart && splice.start <= span.concatEnd;
+          if (!overlapsRange) continue;
+
+          const localStart = Math.max(0, splice.start - span.concatStart);
+          const localEnd = Math.min(updatedTexts[si]!.length, splice.end - span.concatStart);
+          const cur = updatedTexts[si]!;
+          const prefix = cur.slice(0, localStart);
+          const suffix = cur.slice(localEnd);
+          if (!inserted) {
+            updatedTexts[si] = `${prefix}${splice.replacement}${suffix}`;
+            inserted = true;
+          } else {
+            updatedTexts[si] = `${prefix}${suffix}`;
+          }
+        }
+      }
+    }
+
+    // Recompute span offsets after mapping splice so {{...}} resolution sees mapped tokens accurately
+    let mappedConcatText = "";
+    const mappedSpans: WtSpan[] = [];
+    for (let si = 0; si < spans.length; si++) {
+      const span = spans[si]!;
+      const txt = updatedTexts[si] ?? "";
+      const concatStart = mappedConcatText.length;
+      mappedConcatText += txt;
+      const concatEnd = mappedConcatText.length;
+      mappedSpans.push({
+        ...span,
+        decoded: txt,
+        concatStart,
+        concatEnd,
+      });
+    }
+
+    // Detect & resolve all {{placeholders}} in coalesced paragraph text (handles split Word runs!)
     const matches: {
       start: number;
       end: number;
@@ -359,7 +586,7 @@ function transformWordXmlParagraphs(
 
     let pm: RegExpExecArray | null;
     const localRe = new RegExp(PLACEHOLDER_RE.source, "g");
-    while ((pm = localRe.exec(concatText)) !== null) {
+    while ((pm = localRe.exec(mappedConcatText)) !== null) {
       const key = pm[1] ?? "";
       detectedSet.add(key);
 
@@ -367,6 +594,7 @@ function transformWordXmlParagraphs(
         const val = String(variables[key] ?? "").trim();
         if (!val) {
           missingSet.add(key);
+          unresolvedSet.add(key);
         } else {
           replacedSet.add(key);
           matches.push({
@@ -379,40 +607,50 @@ function transformWordXmlParagraphs(
       }
     }
 
-    if (!variables || matches.length === 0 || spans.length === 0) {
-      return pBlock;
-    }
+    if (variables && matches.length > 0) {
+      updatedTexts = mappedSpans.map((s) => s.decoded);
+      for (let mi = matches.length - 1; mi >= 0; mi--) {
+        const match = matches[mi]!;
+        const replacement = match.replacement;
+        if (replacement === null) continue;
 
-    // Rewrite each <w:t> segment cleanly
-    const updatedTexts = spans.map((s) => s.decoded);
-
-    // Process from right to left so positions within earlier segments stay aligned
-    for (let mi = matches.length - 1; mi >= 0; mi--) {
-      const match = matches[mi]!;
-      const replacement = match.replacement;
-      if (replacement === null) continue;
-
-      let inserted = false;
-      for (let si = 0; si < spans.length; si++) {
-        const span = spans[si]!;
-        if (span.concatEnd <= match.start || span.concatStart >= match.end) {
-          continue;
-        }
-        const localStart = Math.max(0, match.start - span.concatStart);
-        const localEnd = Math.min(
-          updatedTexts[si]!.length,
-          match.end - span.concatStart,
-        );
-        const cur = updatedTexts[si]!;
-        const prefix = cur.slice(0, localStart);
-        const suffix = cur.slice(localEnd);
-        if (!inserted) {
-          updatedTexts[si] = `${prefix}${replacement}${suffix}`;
-          inserted = true;
-        } else {
-          updatedTexts[si] = `${prefix}${suffix}`;
+        let inserted = false;
+        for (let si = 0; si < mappedSpans.length; si++) {
+          const span = mappedSpans[si]!;
+          if (span.concatEnd <= match.start || span.concatStart >= match.end) {
+            continue;
+          }
+          const localStart = Math.max(0, match.start - span.concatStart);
+          const localEnd = Math.min(updatedTexts[si]!.length, match.end - span.concatStart);
+          const cur = updatedTexts[si]!;
+          const prefix = cur.slice(0, localStart);
+          const suffix = cur.slice(localEnd);
+          if (!inserted) {
+            updatedTexts[si] = `${prefix}${replacement}${suffix}`;
+            inserted = true;
+          } else {
+            updatedTexts[si] = `${prefix}${suffix}`;
+          }
         }
       }
+    }
+
+    const finalConcat = updatedTexts.join("").trim();
+    if (finalConcat) {
+      paragraphs.push(finalConcat);
+    }
+
+    // Check final paragraph for any remaining {{...}} tokens
+    if (variables) {
+      const verifyRe = new RegExp(PLACEHOLDER_RE.source, "g");
+      let vm: RegExpExecArray | null;
+      while ((vm = verifyRe.exec(updatedTexts.join(""))) !== null) {
+        if (vm[1]) unresolvedSet.add(vm[1]);
+      }
+    }
+
+    if (mappingSplices.length === 0 && (!variables || matches.length === 0)) {
+      return pBlock;
     }
 
     // Reconstruct paragraph XML with preserved xml:space="preserve" when leading/trailing spaces exist
@@ -440,7 +678,198 @@ function transformWordXmlParagraphs(
     detectedPlaceholders: [...detectedSet],
     replacedPlaceholders: [...replacedSet],
     missingPlaceholders: [...missingSet],
+    unresolvedPlaceholders: [...unresolvedSet],
   };
+}
+
+function readRawWordParagraphs(xmlText: string): string[] {
+  const list: string[] = [];
+  const pRegex = /<w:p\b[^>]*>[\s\S]*?<\/w:p>/g;
+  let pm: RegExpExecArray | null;
+  while ((pm = pRegex.exec(xmlText)) !== null) {
+    const wtRegex = /<w:t(?:\s+[^>]*)?>([\s\S]*?)<\/w:t>/g;
+    let concat = "";
+    let wm: RegExpExecArray | null;
+    while ((wm = wtRegex.exec(pm[0])) !== null) {
+      concat += decodeXmlEntities(wm[1] ?? "");
+    }
+    list.push(concat);
+  }
+  return list;
+}
+
+export interface BlankFieldDetectionResult {
+  suggestedMappings: DocxFieldMappingRule[];
+  hasUnmappedBlanks: boolean;
+  isLikelyRelievingTemplate: boolean;
+  blankLabels: string[];
+}
+
+/**
+ * Inspects word/document.xml paragraph-by-paragraph to identify known blank slots
+ * (such as "Date:", "Dear", "from  to", "effective close of business on")
+ * WITHOUT touching unrelated occurrences of "Date" or "Dear" elsewhere.
+ */
+export function detectUnmappedBlankFieldsInDocx(bytes: Uint8Array): BlankFieldDetectionResult {
+  const entries = unzipSync(bytes);
+  const docEntry = entries["word/document.xml"];
+  if (!docEntry) {
+    return {
+      suggestedMappings: [],
+      hasUnmappedBlanks: false,
+      isLikelyRelievingTemplate: false,
+      blankLabels: [],
+    };
+  }
+
+  const rawParagraphs = readRawWordParagraphs(strFromU8(docEntry));
+  const fullTextLower = rawParagraphs.join("\n").toLowerCase();
+  const isLikelyRelievingTemplate =
+    fullTextLower.includes("experience letter") ||
+    fullTextLower.includes("effective close of business on") ||
+    fullTextLower.includes("hereby relieve you");
+
+  const suggestedMappings: DocxFieldMappingRule[] = [];
+  const blankLabels: string[] = [];
+
+  for (let idx = 0; idx < rawParagraphs.length; idx++) {
+    const raw = rawParagraphs[idx] ?? "";
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+
+    if (/^Date\s*:\s*[_.\-\[\]]*$/i.test(trimmed) && !trimmed.includes("{{issue_date}}")) {
+      suggestedMappings.push({
+        id: `map-issue_date-${idx}`,
+        placeholder: "issue_date",
+        label: "Issue Date (Date: line)",
+        paragraphIndex: idx,
+        anchorSnippet: "Date:",
+        strategy: "date_line",
+        enabled: true,
+      });
+      blankLabels.push('Blank "Date:" field');
+    }
+
+    if (/^Dear\b[\s_.\-\[\],]*$/i.test(trimmed) && !trimmed.includes("{{employee_name}}")) {
+      suggestedMappings.push({
+        id: `map-employee_name-${idx}`,
+        placeholder: "employee_name",
+        label: "Employee Name (Dear ...)",
+        paragraphIndex: idx,
+        anchorSnippet: "Dear",
+        strategy: "dear_line",
+        enabled: true,
+      });
+      blankLabels.push('Blank "Dear" salutation');
+    }
+
+    if (/associated\s+with/i.test(trimmed) && /\bas\s+an?\b/i.test(trimmed)) {
+      const hasBlankEmployer = /\bassociated\s+with\s+[_.\-\[\]]*\s*\bas\b/i.test(trimmed);
+      if (!trimmed.includes("{{legal_employer}}")) {
+        suggestedMappings.push({
+          id: `map-legal_employer-${idx}`,
+          placeholder: "legal_employer",
+          label: "Legal Employer (certifying sentence)",
+          paragraphIndex: idx,
+          anchorSnippet: "associated with",
+          strategy: "legal_employer_in_cert",
+          enabled: hasBlankEmployer,
+        });
+        if (hasBlankEmployer) blankLabels.push("Blank Legal Employer");
+      }
+
+      const roleMatch = /\bas\s+an?\s+([^]*?)\s+\bfrom\b/i.exec(trimmed);
+      const roleVal = roleMatch?.[1]?.trim() ?? "";
+      const roleIsBlankOrDefault =
+        !trimmed.includes("{{designation}}") &&
+        (roleVal === "" ||
+          /^[_.\-\[\]]+$/.test(roleVal) ||
+          /AI Data Annotation Analyst|Designation|Role/i.test(roleVal));
+      if (!trimmed.includes("{{designation}}")) {
+        suggestedMappings.push({
+          id: `map-designation-${idx}`,
+          placeholder: "designation",
+          label: "Designation (as a/an ... from)",
+          paragraphIndex: idx,
+          anchorSnippet: "associated with",
+          strategy: "designation_in_cert",
+          enabled: roleIsBlankOrDefault,
+        });
+        if (!roleVal || /^[_.\-\[\]]+$/.test(roleVal)) {
+          blankLabels.push('Blank Designation ("as a/an ... from")');
+        }
+      }
+
+      const fromToMatch = /\bfrom\b\s*([_.\-\[\]\s]*)\s*\bto\b\s*([_.\-\[\]\s]*)[.,]?$/i.exec(
+        trimmed,
+      );
+      if (!trimmed.includes("{{joining_date}}") && fromToMatch) {
+        suggestedMappings.push({
+          id: `map-joining_date-${idx}`,
+          placeholder: "joining_date",
+          label: "Joining Date (from ...)",
+          paragraphIndex: idx,
+          anchorSnippet: "associated with",
+          strategy: "joining_date_in_cert",
+          enabled: true,
+        });
+        blankLabels.push('Blank "from" Joining Date');
+      }
+
+      if (!trimmed.includes("{{last_working_date}}") && fromToMatch) {
+        suggestedMappings.push({
+          id: `map-last_working_date-${idx}`,
+          placeholder: "last_working_date",
+          label: "Last Working Date (... to ...)",
+          paragraphIndex: idx,
+          anchorSnippet: "associated with",
+          strategy: "last_working_date_in_cert",
+          enabled: true,
+        });
+        blankLabels.push('Blank "to" Last Working Date');
+      }
+    }
+
+    if (
+      /effective\s+close\s+of\s+business\s+on\b[\s_.\-\[\]]*[.,]?$/i.test(trimmed) &&
+      !trimmed.includes("{{relieving_date}}")
+    ) {
+      suggestedMappings.push({
+        id: `map-relieving_date-${idx}`,
+        placeholder: "relieving_date",
+        label: "Relieving Date (effective close of business on ...)",
+        paragraphIndex: idx,
+        anchorSnippet: "effective close of business on",
+        strategy: "relieving_effective_line",
+        enabled: true,
+      });
+      blankLabels.push('Blank "effective close of business on" Relieving Date');
+    }
+  }
+
+  return {
+    suggestedMappings,
+    hasUnmappedBlanks: blankLabels.length > 0,
+    isLikelyRelievingTemplate,
+    blankLabels,
+  };
+}
+
+export function detectRemainingBlankFieldsInParagraphs(paragraphs: string[]): string[] {
+  const remaining: string[] = [];
+  for (const raw of paragraphs) {
+    const t = raw.trim();
+    if (!t) continue;
+    if (/^Date\s*:\s*[_.\-\[\]]*$/i.test(t)) remaining.push("Date:");
+    if (/^Dear\b[\s_.\-\[\],]*$/i.test(t)) remaining.push("Dear");
+    if (/\bfrom\b\s*[_.\-\[\]]*\s*\bto\b\s*[_.\-\[\]]*[.,]?$/i.test(t)) {
+      remaining.push("from ... to ...");
+    }
+    if (/effective\s+close\s+of\s+business\s+on\b[\s_.\-\[\]]*[.,]?$/i.test(t)) {
+      remaining.push("effective close of business on");
+    }
+  }
+  return remaining;
 }
 
 export interface DocxInspectionResult {
@@ -451,9 +880,13 @@ export interface DocxInspectionResult {
   hasHeaderOrFooter: boolean;
   hasImages: boolean;
   hasTables: boolean;
+  blankDetection: BlankFieldDetectionResult;
 }
 
-export function extractDocxPlaceholders(bytes: Uint8Array): DocxInspectionResult {
+export function extractDocxPlaceholders(
+  bytes: Uint8Array,
+  fieldMappings?: DocxFieldMappingRule[],
+): DocxInspectionResult {
   const entries = unzipSync(bytes);
   const supportedSet = new Set<string>(CUSTOM_TEMPLATE_PLACEHOLDERS);
   const detectedSet = new Set<string>();
@@ -480,7 +913,8 @@ export function extractDocxPlaceholders(bytes: Uint8Array): DocxInspectionResult
     if (xml.includes("<w:drawing") || xml.includes("<v:imagedata")) {
       hasImages = true;
     }
-    const res = transformWordXmlParagraphs(xml);
+    const activeMappings = name === "word/document.xml" ? fieldMappings : undefined;
+    const res = transformWordXmlParagraphs(xml, undefined, activeMappings);
     for (const ph of res.detectedPlaceholders) {
       detectedSet.add(ph);
     }
@@ -489,6 +923,13 @@ export function extractDocxPlaceholders(bytes: Uint8Array): DocxInspectionResult
     }
   }
 
+  for (const rule of fieldMappings ?? []) {
+    if (rule.enabled) {
+      detectedSet.add(rule.placeholder);
+    }
+  }
+
+  const blankDetection = detectUnmappedBlankFieldsInDocx(bytes);
   const detectedPlaceholders = [...detectedSet];
   return {
     detectedPlaceholders,
@@ -498,30 +939,41 @@ export function extractDocxPlaceholders(bytes: Uint8Array): DocxInspectionResult
     hasHeaderOrFooter,
     hasImages,
     hasTables,
+    blankDetection,
   };
 }
 
 export function personalizeDocxBuffer(
   bytes: Uint8Array,
   variables: Record<string, string>,
+  options?: { fieldMappings?: DocxFieldMappingRule[] | undefined },
 ): {
   buffer: Uint8Array;
   replacedPlaceholders: string[];
   missingPlaceholders: string[];
+  unresolvedPlaceholders: string[];
+  remainingBlankFields: string[];
   previewParagraphs: string[];
+  isVerifiedClean: boolean;
 } {
-  const entries = unzipSync(bytes);
+  // Always unzip fresh from immutable byte copy to guarantee zero cross-recipient mutation
+  const freshBytes = new Uint8Array(bytes);
+  const entries = unzipSync(freshBytes);
   const outEntries: Record<string, Uint8Array> = {};
   const replacedSet = new Set<string>();
   const missingSet = new Set<string>();
+  const unresolvedSet = new Set<string>();
   const previewParagraphs: string[] = [];
 
   for (const [name, content] of Object.entries(entries)) {
     if (/^word\/(document|header\d*|footer\d*)\.xml$/i.test(name)) {
       const xml = strFromU8(content);
-      const res = transformWordXmlParagraphs(xml, variables);
+      const activeMappings =
+        name === "word/document.xml" ? options?.fieldMappings : undefined;
+      const res = transformWordXmlParagraphs(xml, variables, activeMappings);
       for (const p of res.replacedPlaceholders) replacedSet.add(p);
       for (const p of res.missingPlaceholders) missingSet.add(p);
+      for (const p of res.unresolvedPlaceholders) unresolvedSet.add(p);
       if (name === "word/document.xml") {
         previewParagraphs.push(...res.paragraphs);
       }
@@ -531,17 +983,23 @@ export function personalizeDocxBuffer(
     }
   }
 
-  // Apply placeholder resolution again on final document paragraphs for preview display
   const finalDocXml = outEntries["word/document.xml"];
   const renderedParagraphs = finalDocXml
-    ? transformWordXmlParagraphs(strFromU8(finalDocXml)).paragraphs
+    ? readRawWordParagraphs(strFromU8(finalDocXml)).filter((p) => p.trim().length > 0)
     : previewParagraphs;
+  const remainingBlankFields = detectRemainingBlankFieldsInParagraphs(renderedParagraphs);
 
   return {
     buffer: zipSync(outEntries, { level: 6 }),
     replacedPlaceholders: [...replacedSet],
     missingPlaceholders: [...missingSet],
+    unresolvedPlaceholders: [...unresolvedSet],
+    remainingBlankFields,
     previewParagraphs: renderedParagraphs,
+    isVerifiedClean:
+      missingSet.size === 0 &&
+      unresolvedSet.size === 0 &&
+      remainingBlankFields.length === 0,
   };
 }
 
@@ -660,39 +1118,54 @@ export async function personalizeFillablePdf(
 }
 
 /**
- * Maps verified Employee Records / Workforce fields to custom template placeholders.
- * Never invents missing values — leaves missing fields empty so callers can flag & block.
+ * Maps verified Employee Records / Workforce / Relieving fields to custom template placeholders.
+ * Never invents missing employment dates — leaves missing fields empty so pre-send validation blocks them.
  */
 export function buildRecipientPlaceholderVariables(
   recipient: EmailCenterRecipientItem,
-  overrides?: { companyName?: string; issueDate?: string },
+  overrides?: {
+    companyName?: string | undefined;
+    issueDate?: string | undefined;
+    isRelievingTemplate?: boolean | undefined;
+  },
 ): Record<string, string> {
   const todayFormatted = formatLetterDate(new Date().toISOString().slice(0, 10));
-  const rawJoining = recipient.relievingCase?.joiningDate ?? recipient.joiningDate;
-  const rawLastWorking = recipient.relievingCase?.lastWorkingDay ?? recipient.lastWorkingDate;
-  const rawIssue = recipient.relievingCase?.letterIssueDate ?? overrides?.issueDate;
+  const rc = recipient.relievingCase;
+  const rawJoining = rc?.joiningDate ?? recipient.joiningDate;
+  const rawLastWorking = rc?.lastWorkingDay ?? recipient.lastWorkingDate;
+  const rawRelieving =
+    rc?.relievingEffectiveDate ??
+    recipient.relievingEffectiveDate ??
+    rc?.lastWorkingDay ??
+    recipient.lastWorkingDate;
+  const rawIssue = overrides?.issueDate ?? rc?.letterIssueDate;
 
-  const companyName =
-    String(
-      overrides?.companyName ??
-        recipient.legalEmployer ??
-        recipient.relievingCase?.legalEmployer ??
-        "The AI School",
-    ).trim();
+  const legalEmployer = String(
+    overrides?.companyName ?? rc?.legalEmployer ?? recipient.legalEmployer ?? "",
+  ).trim();
+  const companyName = legalEmployer || "The AI School";
 
   return {
     employee_name: recipient.fullName.trim(),
     employee_id: (recipient.employeeCode || recipient.historicalRecordId || "").trim(),
-    designation: (recipient.designation ?? "").trim(),
+    designation: (rc?.designation || recipient.designation || "").trim(),
     joining_date: rawJoining ? formatLetterDate(rawJoining) : "",
     last_working_date: rawLastWorking ? formatLetterDate(rawLastWorking) : "",
+    relieving_date: rawRelieving ? formatLetterDate(rawRelieving) : "",
     work_type: recipient.workType && recipient.workType !== "unknown" ? recipient.workType : "",
     employment_category:
       recipient.employmentCategory && recipient.employmentCategory !== "unknown"
         ? recipient.employmentCategory
         : "",
+    legal_employer: legalEmployer,
     company_name: companyName,
-    issue_date: rawIssue ? formatLetterDate(rawIssue) : todayFormatted,
+    signatory_name: (rc?.signatoryName || "").trim(),
+    signatory_title: (rc?.signatoryTitle || "").trim(),
+    issue_date: rawIssue
+      ? formatLetterDate(rawIssue)
+      : overrides?.isRelievingTemplate
+        ? ""
+        : todayFormatted,
   };
 }
 
@@ -991,9 +1464,18 @@ export function evaluateRelievingRecipientReadiness(
   };
 }
 
+const VALIDATION_STATUS_LABELS: Record<CustomRecipientValidationStatus, string> = {
+  ready: "Ready",
+  missing_information: "Missing Information",
+  approval_pending: "Approval Pending",
+  invalid_template: "Invalid Template",
+  already_sent: "Already Sent",
+  blocked: "Blocked",
+};
+
 /**
- * Evaluates whether a recipient can receive a given custom email template cleanly
- * without inventing missing placeholders or using missing emails.
+ * Evaluates whether a recipient can receive a custom email template cleanly
+ * without inventing missing dates, sending blank DOCX slots, or bypassing relieving approval.
  */
 export function evaluateCustomTemplateRecipientReadiness(input: {
   template: CustomEmailTemplateRecord;
@@ -1001,19 +1483,37 @@ export function evaluateCustomTemplateRecipientReadiness(input: {
   defaultEmailMode: RecipientEmailMode;
   overrideMode?: RecipientEmailMode | undefined;
   attachmentPlaceholders?: string[] | undefined;
+  attachmentHasUnmappedBlanks?: boolean | undefined;
 }): {
+  validationStatus: CustomRecipientValidationStatus;
+  statusLabel: string;
   emailResolution: RecipientEmailResolution;
   missingPlaceholders: string[];
   ready: boolean;
   reason: string | null;
+  reasons: string[];
+  resolvedVariables: Record<string, string>;
+  resolvedFilename: string | null;
+  isRelievingTemplate: boolean;
 } {
+  const isRelievingTemplate = isRelievingStyleCustomTemplate({
+    templateName: input.template.name,
+    attachmentFilename: input.template.attachmentFilename,
+    purposeCategory: input.template.purposeCategory,
+    requiresRelievingApproval: input.template.requiresRelievingApproval,
+  });
+
   const emailResolution = resolveRecipientEmailSelection(
     input.recipient,
     input.defaultEmailMode,
     input.overrideMode,
+    { isRelievingWorkflow: isRelievingTemplate },
   );
 
-  const vars = buildRecipientPlaceholderVariables(input.recipient);
+  const vars = buildRecipientPlaceholderVariables(input.recipient, {
+    isRelievingTemplate,
+  });
+
   const renderedEmail = renderCustomEmailContent({
     subjectTemplate: input.template.subjectTemplate,
     bodyHtmlTemplate: input.template.bodyHtmlTemplate,
@@ -1021,15 +1521,32 @@ export function evaluateCustomTemplateRecipientReadiness(input: {
     variables: vars,
   });
 
+  const effectiveDocMode: CustomDocumentMode = isRelievingTemplate
+    ? "personalized"
+    : input.template.documentMode;
+
+  const resolvedFilename =
+    input.template.attachmentFormat !== "none"
+      ? buildPersonalizedAttachmentFilename({
+          employeeFullName: input.recipient.fullName,
+          templateDisplayName: input.template.name,
+          format: input.template.attachmentFormat,
+          documentMode: effectiveDocMode,
+          staticOriginalFilename: input.template.attachmentFilename,
+        })
+      : null;
+
+  const enabledMappings = (input.template.fieldMappings ?? []).filter((m) => m.enabled);
   const allMissing = new Set<string>(renderedEmail.missingPlaceholders);
 
-  // If attachment is DOCX or fillable PDF, check required placeholders in the document too
   if (
-    input.template.attachmentFormat === "docx" ||
+    (input.template.attachmentFormat === "docx" && effectiveDocMode === "personalized") ||
     (input.template.attachmentFormat === "pdf" && input.template.pdfMode === "fillable")
   ) {
-    const docPlaceholders =
-      input.attachmentPlaceholders ?? input.template.detectedPlaceholders ?? [];
+    const docPlaceholders = new Set<string>([
+      ...(input.attachmentPlaceholders ?? input.template.detectedPlaceholders ?? []),
+      ...enabledMappings.map((m) => m.placeholder),
+    ]);
     for (const key of docPlaceholders) {
       const val = String(vars[key] ?? "").trim();
       if (!val) {
@@ -1039,30 +1556,136 @@ export function evaluateCustomTemplateRecipientReadiness(input: {
   }
 
   const missingPlaceholders = [...allMissing];
+  const reasons: string[] = [];
 
-  if (emailResolution.status !== "ready") {
+  if (isRelievingTemplate && input.template.documentMode === "static") {
+    reasons.push(
+      "Relieving templates require PERSONALIZED DOCUMENT mode and cannot be sent as a static unfilled file.",
+    );
     return {
+      validationStatus: "invalid_template",
+      statusLabel: VALIDATION_STATUS_LABELS["invalid_template"],
       emailResolution,
       missingPlaceholders,
       ready: false,
-      reason: emailResolution.statusLabel,
+      reason: reasons[0]!,
+      reasons,
+      resolvedVariables: vars,
+      resolvedFilename,
+      isRelievingTemplate,
     };
   }
 
-  if (missingPlaceholders.length > 0) {
+  if (
+    input.template.attachmentFormat === "docx" &&
+    effectiveDocMode === "personalized" &&
+    input.attachmentHasUnmappedBlanks &&
+    enabledMappings.length === 0
+  ) {
+    reasons.push(
+      "Uploaded Word template contains unmapped blank fields. Inspect & enable field mappings before sending.",
+    );
     return {
+      validationStatus: "invalid_template",
+      statusLabel: VALIDATION_STATUS_LABELS["invalid_template"],
       emailResolution,
       missingPlaceholders,
       ready: false,
-      reason: `Missing placeholder values: ${missingPlaceholders.map((p) => `{{${p}}}`).join(", ")}`,
+      reason: reasons[0]!,
+      reasons,
+      resolvedVariables: vars,
+      resolvedFilename,
+      isRelievingTemplate,
+    };
+  }
+
+  if (isRelievingTemplate) {
+    const rc = input.recipient.relievingCase;
+    const rcStatus = rc?.status.toLowerCase() ?? "";
+    if (rcStatus === "rejected" || rcStatus === "cancelled") {
+      const msg = `Relieving case status is "${rc?.status}".`;
+      return {
+        validationStatus: "blocked",
+        statusLabel: VALIDATION_STATUS_LABELS["blocked"],
+        emailResolution,
+        missingPlaceholders,
+        ready: false,
+        reason: msg,
+        reasons: [msg],
+        resolvedVariables: vars,
+        resolvedFilename,
+        isRelievingTemplate,
+      };
+    }
+    if (!rc || (rcStatus !== "approved" && rcStatus !== "relieved")) {
+      const msg = rc
+        ? `Relieving case is "${rc.status}". Formal HR approval is required before sending official relieving documents.`
+        : "No approved relieving case found for this employee.";
+      return {
+        validationStatus: "approval_pending",
+        statusLabel: VALIDATION_STATUS_LABELS["approval_pending"],
+        emailResolution,
+        missingPlaceholders,
+        ready: false,
+        reason: msg,
+        reasons: [msg],
+        resolvedVariables: vars,
+        resolvedFilename,
+        isRelievingTemplate,
+      };
+    }
+    if (rc.emailStatus === "accepted_by_smtp" || rc.emailStatus === "delivered") {
+      const msg = `Relieving letter already sent (${rc.emailStatus}).`;
+      return {
+        validationStatus: "already_sent",
+        statusLabel: VALIDATION_STATUS_LABELS["already_sent"],
+        emailResolution,
+        missingPlaceholders,
+        ready: false,
+        reason: msg,
+        reasons: [msg],
+        resolvedVariables: vars,
+        resolvedFilename,
+        isRelievingTemplate,
+      };
+    }
+  }
+
+  if (emailResolution.status !== "ready") {
+    reasons.push(emailResolution.statusLabel);
+  }
+  if (missingPlaceholders.length > 0) {
+    reasons.push(
+      `Missing required fields: ${missingPlaceholders.map((p) => `{{${p}}}`).join(", ")}`,
+    );
+  }
+
+  if (reasons.length > 0) {
+    return {
+      validationStatus: "missing_information",
+      statusLabel: VALIDATION_STATUS_LABELS["missing_information"],
+      emailResolution,
+      missingPlaceholders,
+      ready: false,
+      reason: reasons.join(" • "),
+      reasons,
+      resolvedVariables: vars,
+      resolvedFilename,
+      isRelievingTemplate,
     };
   }
 
   return {
+    validationStatus: "ready",
+    statusLabel: VALIDATION_STATUS_LABELS["ready"],
     emailResolution,
     missingPlaceholders: [],
     ready: true,
     reason: null,
+    reasons: [],
+    resolvedVariables: vars,
+    resolvedFilename,
+    isRelievingTemplate,
   };
 }
 

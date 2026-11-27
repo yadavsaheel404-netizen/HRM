@@ -2,8 +2,10 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
   CheckCircle2,
+  Download,
   Eye,
   FileText,
+  Filter,
   History,
   Loader2,
   Mail,
@@ -54,6 +56,7 @@ import {
   cancelQueuedBatchItems,
   createBulkDispatchBatch,
   getDispatchBatchDetail,
+  inspectStoredCustomTemplate,
   listCustomEmailTemplates,
   listDispatchBatches,
   previewCustomEmailTemplate,
@@ -62,24 +65,29 @@ import {
   uploadAndSaveCustomTemplate,
 } from "@/lib/email-center-bulk.functions";
 import {
+  buildPersonalizedAttachmentFilename,
   deduplicateRecipientDispatches,
   evaluateCustomTemplateRecipientReadiness,
   extractDocxPlaceholders,
   inspectPdfTemplate,
+  isRelievingStyleCustomTemplate,
   validateUploadedTemplateFile,
 } from "@/lib/email-center/custom-templates";
 import {
   CUSTOM_TEMPLATE_PLACEHOLDERS,
   OFFICIAL_SENDER_DISPLAY,
   STATIC_PDF_WARNING_MESSAGE,
+  type CustomDocumentMode,
   type CustomEmailTemplateRecord,
   type CustomTemplateRecipientType,
   type CustomTemplateStatus,
+  type DocxFieldMappingRule,
   type EmailCenterRecipientItem,
   type EmailDispatchBatchRecord,
   type EmailDispatchItemRecord,
   type RecipientEmailMode,
 } from "@/lib/email-center/types";
+import { formatLetterDate } from "@/lib/relieving/types";
 import { RecordsRecipientPicker } from "./records-recipient-picker";
 
 export type CustomWorkspaceSubTab =
@@ -164,6 +172,10 @@ export function CustomTemplatesWorkspace({
     useState<RecipientEmailMode>("personal");
   const [templateStatus, setTemplateStatus] = useState<CustomTemplateStatus>("draft");
   const [requiresElevatedApproval, setRequiresElevatedApproval] = useState(false);
+  const [documentMode, setDocumentMode] = useState<CustomDocumentMode>("personalized");
+  const [fieldMappings, setFieldMappings] = useState<DocxFieldMappingRule[]>([]);
+  const [requiresRelievingApproval, setRequiresRelievingApproval] = useState(false);
+  const [inspectingStored, setInspectingStored] = useState(false);
 
   const [pendingUpload, setPendingUpload] = useState<{
     fileName: string;
@@ -191,7 +203,7 @@ export function CustomTemplatesWorkspace({
 
   // Live preview state
   const [sampleRecipientId, setSampleRecipientId] = useState<string>("");
-  const [previewMode, setPreviewMode] = useState<"html" | "text" | "document">("html");
+  const [previewMode, setPreviewMode] = useState<"html" | "text" | "document">("document");
   const [previewBusy, setPreviewBusy] = useState(false);
   const [previewResult, setPreviewResult] = useState<{
     subject: string;
@@ -199,11 +211,44 @@ export function CustomTemplatesWorkspace({
     bodyText: string;
     detectedPlaceholders: string[];
     missingPlaceholders: string[];
+    unresolvedPlaceholders: string[];
+    remainingBlankFields: string[];
+    isVerifiedClean: boolean;
+    resolvedAttachmentFilename: string | null;
     pdfMode: "static" | "fillable" | null;
     pdfWarning: string | null;
     docxParagraphs: string[];
     personalizedAttachmentBase64: string | null;
   } | null>(null);
+
+  // Per-recipient actual document preview modal state
+  const [docModal, setDocModal] = useState<{
+    open: boolean;
+    loading: boolean;
+    recipientName: string;
+    attachmentFilename: string;
+    mimeType: string;
+    isVerifiedClean: boolean;
+    missingPlaceholders: string[];
+    unresolvedPlaceholders: string[];
+    remainingBlankFields: string[];
+    pdfWarning: string | null;
+    docxParagraphs: string[];
+    base64Data: string | null;
+  }>({
+    open: false,
+    loading: false,
+    recipientName: "",
+    attachmentFilename: "",
+    mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    isVerifiedClean: true,
+    missingPlaceholders: [],
+    unresolvedPlaceholders: [],
+    remainingBlankFields: [],
+    pdfWarning: null,
+    docxParagraphs: [],
+    base64Data: null,
+  });
 
   // Dispatch state
   const [confirmSendOpen, setConfirmSendOpen] = useState(false);
@@ -229,6 +274,9 @@ export function CustomTemplatesWorkspace({
       setDefaultEmailMode(activeTemplate.defaultEmailMode);
       setTemplateStatus(activeTemplate.status);
       setRequiresElevatedApproval(activeTemplate.requiresElevatedApproval);
+      setDocumentMode(activeTemplate.documentMode ?? "personalized");
+      setFieldMappings(activeTemplate.fieldMappings ?? []);
+      setRequiresRelievingApproval(Boolean(activeTemplate.requiresRelievingApproval));
       setPendingUpload(null);
       setClearAttachment(false);
       setPreviewResult(null);
@@ -249,6 +297,9 @@ export function CustomTemplatesWorkspace({
     setDefaultEmailMode("personal");
     setTemplateStatus("draft");
     setRequiresElevatedApproval(false);
+    setDocumentMode("personalized");
+    setFieldMappings([]);
+    setRequiresRelievingApproval(false);
     setPendingUpload(null);
     setClearAttachment(false);
     setPreviewResult(null);
@@ -272,26 +323,57 @@ export function CustomTemplatesWorkspace({
 
       if (validation.format === "docx") {
         const info = extractDocxPlaceholders(bytes);
+        const suggested = info.blankDetection.suggestedMappings;
+        if (suggested.length > 0) {
+          setFieldMappings(suggested);
+        }
+        const isRelievingDoc =
+          info.blankDetection.isLikelyRelievingTemplate ||
+          isRelievingStyleCustomTemplate({
+            templateName: name || validation.safeFileName,
+            attachmentFilename: validation.safeFileName,
+            purposeCategory,
+          });
+        if (isRelievingDoc) {
+          setDocumentMode("personalized");
+          setRequiresRelievingApproval(true);
+        }
+
+        const mergedPlaceholders = [
+          ...new Set([
+            ...info.detectedPlaceholders,
+            ...suggested.filter((m) => m.enabled).map((m) => m.placeholder),
+          ]),
+        ];
+
         setPendingUpload({
           fileName: validation.safeFileName,
           mimeType: validation.normalizedMime,
           base64Data: arrayBufferToBase64(ab),
           format: "docx",
-          detectedPlaceholders: info.detectedPlaceholders,
+          detectedPlaceholders: mergedPlaceholders,
           pdfMode: null,
           warning:
-            info.unsupportedPlaceholders.length > 0
-              ? `Unsupported placeholders detected: ${info.unsupportedPlaceholders.join(", ")}`
-              : null,
+            info.blankDetection.hasUnmappedBlanks && suggested.length > 0
+              ? `Detected ${suggested.filter((m) => m.enabled).length} blank template field(s) mapped automatically for personalization.`
+              : info.unsupportedPlaceholders.length > 0
+                ? `Unsupported placeholders detected: ${info.unsupportedPlaceholders.join(", ")}`
+                : null,
           hasImages: info.hasImages,
           hasTables: info.hasTables,
           hasHeaderOrFooter: info.hasHeaderOrFooter,
         });
         toast.success(
-          `Word template verified (${info.detectedPlaceholders.length} placeholder(s) found).`,
+          `Word template verified (${mergedPlaceholders.length} personalized field(s) mapped).`,
         );
       } else {
         const pdfInfo = await inspectPdfTemplate(bytes);
+        setFieldMappings([]);
+        if (pdfInfo.mode === "static") {
+          setDocumentMode("static");
+        } else {
+          setDocumentMode("personalized");
+        }
         setPendingUpload({
           fileName: validation.safeFileName,
           mimeType: validation.normalizedMime,
@@ -329,6 +411,30 @@ export function CustomTemplatesWorkspace({
     onConsumedInitialFile?.();
   }, [initialFileToUpload]);
 
+  const handleInspectStoredTemplate = async () => {
+    if (!activeTemplate) return;
+    setInspectingStored(true);
+    try {
+      const res = await inspectStoredCustomTemplate({
+        data: { templateId: activeTemplate.id },
+      });
+      setFieldMappings(res.suggestedMappings);
+      if (res.isLikelyRelievingTemplate) {
+        setDocumentMode("personalized");
+        setRequiresRelievingApproval(true);
+      }
+      toast.success(
+        res.suggestedMappings.length > 0
+          ? `Detected ${res.suggestedMappings.filter((m) => m.enabled).length} field mapping(s) in stored template. Save/Publish to apply.`
+          : "Inspected stored document: all explicit placeholders are listed.",
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed inspecting stored template.");
+    } finally {
+      setInspectingStored(false);
+    }
+  };
+
   const handleSaveTemplate = async (overrideStatus?: CustomTemplateStatus) => {
     setSaving(true);
     try {
@@ -344,6 +450,9 @@ export function CustomTemplatesWorkspace({
           recipientType,
           defaultEmailMode,
           status: overrideStatus ?? templateStatus,
+          documentMode,
+          fieldMappings,
+          requiresRelievingApproval,
           requiresElevatedApproval,
           clearAttachment,
           file: pendingUpload
@@ -357,6 +466,9 @@ export function CustomTemplatesWorkspace({
       });
       await queryClient.invalidateQueries({ queryKey: ["custom-email-templates"] });
       onSelectTemplateId(res.template.id);
+      setFieldMappings(res.template.fieldMappings ?? res.suggestedMappings ?? []);
+      setDocumentMode(res.template.documentMode);
+      setRequiresRelievingApproval(res.template.requiresRelievingApproval);
       setPendingUpload(null);
       setClearAttachment(false);
       toast.success(
@@ -377,18 +489,30 @@ export function CustomTemplatesWorkspace({
     [selectedIds, recipientCache],
   );
 
+  const effectiveTemplateForValidation = useMemo(() => {
+    if (!activeTemplate) return null;
+    const activeMappings =
+      fieldMappings.length > 0 ? fieldMappings : activeTemplate.fieldMappings;
+    return {
+      ...activeTemplate,
+      documentMode,
+      fieldMappings: activeMappings,
+      requiresRelievingApproval,
+    };
+  }, [activeTemplate, fieldMappings, documentMode, requiresRelievingApproval]);
+
   const evaluatedRecipients = useMemo(() => {
-    if (!activeTemplate) return [];
+    if (!effectiveTemplateForValidation) return [];
     return selectedRecipients.map((recipient) => ({
       recipient,
       evalRes: evaluateCustomTemplateRecipientReadiness({
-        template: activeTemplate,
+        template: effectiveTemplateForValidation,
         recipient,
         defaultEmailMode,
         overrideMode: perRecipientOverrides[recipient.recordId],
       }),
     }));
-  }, [activeTemplate, selectedRecipients, defaultEmailMode, perRecipientOverrides]);
+  }, [effectiveTemplateForValidation, selectedRecipients, defaultEmailMode, perRecipientOverrides]);
 
   const readyRecipients = useMemo(
     () => evaluatedRecipients.filter((r) => r.evalRes.ready),
@@ -406,6 +530,20 @@ export function CustomTemplatesWorkspace({
     [readyRecipients],
   );
 
+  const downloadBase64Attachment = (
+    base64Data: string,
+    fileName: string,
+    mimeType: string,
+  ) => {
+    const bytes = Uint8Array.from(atob(base64Data), (c) => c.charCodeAt(0));
+    const url = URL.createObjectURL(new Blob([bytes], { type: mimeType }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = fileName;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  };
+
   const handleRunLivePreview = async () => {
     if (!activeTemplate) {
       toast.error("Save the template as Draft or Approved before previewing.");
@@ -418,14 +556,23 @@ export function CustomTemplatesWorkspace({
           templateId: activeTemplate.id,
           sampleRecipientRecordId:
             sampleRecipientId || selectedRecipients[0]?.recordId || null,
+          overrideFieldMappings: fieldMappings.length > 0 ? fieldMappings : undefined,
+          overrideDocumentMode: documentMode,
         },
       });
+      if (fieldMappings.length === 0 && res.suggestedMappings.length > 0) {
+        setFieldMappings(res.suggestedMappings);
+      }
       setPreviewResult({
         subject: res.subject,
         bodyHtml: res.bodyHtml,
         bodyText: res.bodyText,
         detectedPlaceholders: res.detectedPlaceholders,
         missingPlaceholders: res.missingPlaceholders,
+        unresolvedPlaceholders: res.unresolvedPlaceholders,
+        remainingBlankFields: res.remainingBlankFields,
+        isVerifiedClean: res.isVerifiedClean,
+        resolvedAttachmentFilename: res.resolvedAttachmentFilename,
         pdfMode: res.pdfMode,
         pdfWarning: res.pdfWarning,
         docxParagraphs: res.docxParagraphs,
@@ -435,6 +582,76 @@ export function CustomTemplatesWorkspace({
       toast.error(err instanceof Error ? err.message : "Preview generation failed.");
     } finally {
       setPreviewBusy(false);
+    }
+  };
+
+  const handlePreviewRecipientDocument = async (recipient: EmailCenterRecipientItem) => {
+    if (!activeTemplate) {
+      toast.error("Save the template before previewing personalized attachments.");
+      return;
+    }
+    const format = activeTemplate.attachmentFormat === "pdf" ? "pdf" : "docx";
+    const expectedFilename = buildPersonalizedAttachmentFilename({
+      employeeFullName: recipient.fullName,
+      templateDisplayName: activeTemplate.name,
+      format,
+      documentMode:
+        isRelievingStyleCustomTemplate({
+          templateName: activeTemplate.name,
+          attachmentFilename: activeTemplate.attachmentFilename,
+          purposeCategory: activeTemplate.purposeCategory,
+          requiresRelievingApproval,
+        })
+          ? "personalized"
+          : documentMode,
+      staticOriginalFilename: activeTemplate.attachmentFilename,
+    });
+    const mimeType =
+      format === "pdf"
+        ? "application/pdf"
+        : "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+    setDocModal({
+      open: true,
+      loading: true,
+      recipientName: recipient.fullName,
+      attachmentFilename: expectedFilename,
+      mimeType,
+      isVerifiedClean: false,
+      missingPlaceholders: [],
+      unresolvedPlaceholders: [],
+      remainingBlankFields: [],
+      pdfWarning: null,
+      docxParagraphs: [],
+      base64Data: null,
+    });
+
+    try {
+      const res = await previewCustomEmailTemplate({
+        data: {
+          templateId: activeTemplate.id,
+          sampleRecipientRecordId: recipient.recordId,
+          overrideFieldMappings: fieldMappings.length > 0 ? fieldMappings : undefined,
+          overrideDocumentMode: documentMode,
+        },
+      });
+      setDocModal({
+        open: true,
+        loading: false,
+        recipientName: recipient.fullName,
+        attachmentFilename: res.resolvedAttachmentFilename ?? expectedFilename,
+        mimeType,
+        isVerifiedClean: res.isVerifiedClean,
+        missingPlaceholders: res.missingPlaceholders,
+        unresolvedPlaceholders: res.unresolvedPlaceholders,
+        remainingBlankFields: res.remainingBlankFields,
+        pdfWarning: res.pdfWarning,
+        docxParagraphs: res.docxParagraphs,
+        base64Data: res.personalizedAttachmentBase64,
+      });
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not generate document preview.");
+      setDocModal((prev) => ({ ...prev, open: false, loading: false }));
     }
   };
 
@@ -900,6 +1117,121 @@ export function CustomTemplatesWorkspace({
               </span>
             </div>
 
+            {/* Controlled Document Mode + DOCX Field Mapping Panel */}
+            <div className="rounded-lg border border-border bg-muted/20 p-3.5 space-y-3 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="font-semibold text-foreground">
+                    Document Personalization &amp; Attachment Naming
+                  </p>
+                  <p className="text-[11px] text-muted-foreground">
+                    Output filename:{" "}
+                    <code>
+                      Employee Full Name - {name.trim() || "Template Display Name"}.
+                      {pendingUpload?.format ??
+                        (activeTemplate?.attachmentFormat === "pdf" ? "pdf" : "docx")}
+                    </code>
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <div
+                    className="inline-flex rounded-md border border-border bg-background p-0.5"
+                    role="group"
+                    aria-label="Document personalization mode"
+                  >
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={!canManage}
+                      variant={documentMode === "personalized" ? "default" : "ghost"}
+                      className="h-7 px-2.5 text-[11px] font-semibold"
+                      onClick={() => setDocumentMode("personalized")}
+                    >
+                      PERSONALIZED DOCUMENT
+                    </Button>
+                    <Button
+                      type="button"
+                      size="sm"
+                      disabled={!canManage || requiresRelievingApproval}
+                      variant={documentMode === "static" ? "default" : "ghost"}
+                      className="h-7 px-2.5 text-[11px] font-semibold"
+                      onClick={() => setDocumentMode("static")}
+                    >
+                      STATIC DOCUMENT
+                    </Button>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <label className="flex cursor-pointer items-center gap-1.5 text-[11px]">
+                  <Checkbox
+                    checked={requiresRelievingApproval}
+                    disabled={!canManage}
+                    onCheckedChange={(v) => {
+                      const next = Boolean(v);
+                      setRequiresRelievingApproval(next);
+                      if (next) setDocumentMode("personalized");
+                    }}
+                  />
+                  <span>
+                    Official Relieving / Experience Template (requires approved relieving case &amp; verified dates)
+                  </span>
+                </label>
+
+                {canManage && activeTemplate?.attachmentFilename ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-7 text-[11px]"
+                    disabled={inspectingStored}
+                    onClick={() => void handleInspectStoredTemplate()}
+                  >
+                    <RefreshCw
+                      className={`mr-1 size-3 ${inspectingStored ? "animate-spin" : ""}`}
+                    />
+                    {inspectingStored ? "Inspecting..." : "Inspect Stored DOCX & Detect Blank Fields"}
+                  </Button>
+                ) : null}
+              </div>
+
+              {fieldMappings.length > 0 ? (
+                <div className="space-y-1.5 rounded border border-border bg-background p-2.5">
+                  <p className="font-semibold text-[11px] text-foreground">
+                    Controlled Word Field Mappings ({fieldMappings.filter((m) => m.enabled).length} active):
+                  </p>
+                  <div className="grid gap-1.5 sm:grid-cols-2">
+                    {fieldMappings.map((rule) => (
+                      <label
+                        key={rule.id}
+                        className="flex cursor-pointer items-center justify-between gap-2 rounded border border-border/60 px-2 py-1 text-[11px]"
+                      >
+                        <span className="flex items-center gap-1.5 min-w-0">
+                          <Checkbox
+                            checked={rule.enabled}
+                            disabled={!canManage}
+                            onCheckedChange={(v) =>
+                              setFieldMappings((prev) =>
+                                prev.map((m) =>
+                                  m.id === rule.id ? { ...m, enabled: Boolean(v) } : m,
+                                ),
+                              )
+                            }
+                          />
+                          <span className="truncate">{rule.label}</span>
+                        </span>
+                        <code className="shrink-0 text-[10px] text-primary">
+                          {`{{${rule.placeholder}}}`}
+                        </code>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+
             {/* Settings + Save Actions */}
             <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3 text-xs">
               <div className="flex flex-wrap items-center gap-4">
@@ -986,68 +1318,144 @@ export function CustomTemplatesWorkspace({
             />
 
             {evaluatedRecipients.length > 0 ? (
-              <div className="overflow-x-auto rounded-md border border-border">
-                <table className="w-full text-left text-xs">
-                  <thead>
-                    <tr className="border-b border-border bg-muted/50 text-[11px] text-muted-foreground">
-                      <th className="px-2.5 py-2">Employee</th>
-                      <th className="px-2.5 py-2">Email Mode Override</th>
-                      <th className="px-2.5 py-2">Target Address</th>
-                      <th className="px-2.5 py-2">Validation</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-border/60">
-                    {evaluatedRecipients.map(({ recipient, evalRes }) => {
-                      const override =
-                        perRecipientOverrides[recipient.recordId] ?? defaultEmailMode;
-                      return (
-                        <tr key={recipient.recordId}>
-                          <td className="px-2.5 py-2 font-medium">{recipient.fullName}</td>
-                          <td className="px-2.5 py-2">
-                            <select
-                              aria-label={`Override email mode for ${recipient.fullName}`}
-                              value={override}
-                              onChange={(e) =>
-                                setPerRecipientOverrides((prev) => ({
-                                  ...prev,
-                                  [recipient.recordId]: e.target.value as RecipientEmailMode,
-                                }))
-                              }
-                              className="h-7 rounded border border-input bg-background px-1.5 text-[11px]"
-                            >
-                              <option value="personal">PERSONAL EMAIL</option>
-                              <option value="work">WORK EMAIL</option>
-                            </select>
-                          </td>
-                          <td className="px-2.5 py-2 font-mono text-[11px]">
-                            {evalRes.emailResolution.resolvedEmail ? (
-                              canViewPersonalEmails || override === "work" ? (
-                                evalRes.emailResolution.resolvedEmail
-                              ) : (
-                                "Verified Personal Email"
-                              )
-                            ) : (
-                              <span className="text-destructive">
-                                {evalRes.emailResolution.statusLabel}
-                              </span>
-                            )}
-                          </td>
-                          <td className="px-2.5 py-2">
-                            {evalRes.ready ? (
-                              <Badge variant="success" className="text-[10px]">
-                                Ready
+              <div className="space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <span className="font-semibold text-foreground">
+                    Pre-Send Validation &amp; Per-Recipient Attachment Review ({readyRecipients.length} Ready / {evaluatedRecipients.length} Selected)
+                  </span>
+                  {evaluatedRecipients.length > readyRecipients.length ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-[11px]"
+                      onClick={() => {
+                        setSelectedIds(readyRecipients.map((r) => r.recipient.recordId));
+                        toast.info(`Kept ${readyRecipients.length} verified ready recipient(s).`);
+                      }}
+                    >
+                      <Filter className="mr-1 size-3" />
+                      Exclude Invalid ({evaluatedRecipients.length - readyRecipients.length})
+                    </Button>
+                  ) : null}
+                </div>
+
+                <div className="overflow-x-auto rounded-md border border-border">
+                  <table className="w-full text-left text-xs">
+                    <thead>
+                      <tr className="border-b border-border bg-muted/50 text-[11px] text-muted-foreground">
+                        <th className="px-2 py-2">Employee &amp; ID</th>
+                        <th className="px-2 py-2">Email Type &amp; Target</th>
+                        <th className="px-2 py-2">Issue Date</th>
+                        <th className="px-2 py-2">Joining Date</th>
+                        <th className="px-2 py-2">Last Working</th>
+                        <th className="px-2 py-2">Relieving Date</th>
+                        <th className="px-2 py-2">Designation</th>
+                        <th className="px-2 py-2">Document Preview</th>
+                        <th className="px-2 py-2">Validation Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border/60">
+                      {evaluatedRecipients.map(({ recipient, evalRes }) => {
+                        const override =
+                          perRecipientOverrides[recipient.recordId] ?? defaultEmailMode;
+                        const vars = evalRes.resolvedVariables;
+                        return (
+                          <tr key={recipient.recordId} className="align-top">
+                            <td className="px-2 py-2">
+                              <div className="font-medium text-foreground">{recipient.fullName}</div>
+                              <div className="font-mono text-[10px] text-muted-foreground">
+                                {recipient.employeeCode ?? recipient.historicalRecordId}
+                              </div>
+                            </td>
+                            <td className="px-2 py-2">
+                              <div className="flex flex-col gap-1">
+                                <select
+                                  aria-label={`Override email mode for ${recipient.fullName}`}
+                                  value={override}
+                                  onChange={(e) =>
+                                    setPerRecipientOverrides((prev) => ({
+                                      ...prev,
+                                      [recipient.recordId]: e.target.value as RecipientEmailMode,
+                                    }))
+                                  }
+                                  className="h-6 rounded border border-input bg-background px-1 text-[10px]"
+                                >
+                                  <option value="personal">PERSONAL EMAIL</option>
+                                  <option value="work">WORK EMAIL</option>
+                                </select>
+                                <span className="truncate max-w-[160px] font-mono text-[10px]">
+                                  {evalRes.emailResolution.resolvedEmail ? (
+                                    canViewPersonalEmails || override === "work" ? (
+                                      evalRes.emailResolution.resolvedEmail
+                                    ) : (
+                                      "Verified Personal Email"
+                                    )
+                                  ) : (
+                                    <span className="text-destructive">
+                                      {evalRes.emailResolution.statusLabel}
+                                    </span>
+                                  )}
+                                </span>
+                              </div>
+                            </td>
+                            <td className="px-2 py-2 font-mono text-[11px]">
+                              {vars["issue_date"] || <span className="text-destructive">Missing</span>}
+                            </td>
+                            <td className="px-2 py-2 font-mono text-[11px]">
+                              {vars["joining_date"] || <span className="text-destructive">Missing</span>}
+                            </td>
+                            <td className="px-2 py-2 font-mono text-[11px]">
+                              {vars["last_working_date"] || <span className="text-destructive">Missing</span>}
+                            </td>
+                            <td className="px-2 py-2 font-mono text-[11px]">
+                              {vars["relieving_date"] || <span className="text-destructive">Missing</span>}
+                            </td>
+                            <td className="px-2 py-2 text-[11px]">
+                              {vars["designation"] || <span className="text-destructive">Missing</span>}
+                            </td>
+                            <td className="px-2 py-2">
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                className="h-7 px-2 text-[10px]"
+                                onClick={() => void handlePreviewRecipientDocument(recipient)}
+                              >
+                                <Eye className="mr-1 size-3" />
+                                Preview This Employee&apos;s Document
+                              </Button>
+                              {evalRes.resolvedFilename ? (
+                                <p className="mt-1 max-w-[180px] truncate font-mono text-[9px] text-muted-foreground">
+                                  {evalRes.resolvedFilename}
+                                </p>
+                              ) : null}
+                            </td>
+                            <td className="px-2 py-2">
+                              <Badge
+                                variant={
+                                  evalRes.validationStatus === "ready"
+                                    ? "success"
+                                    : evalRes.validationStatus === "approval_pending"
+                                      ? "outline"
+                                      : "destructive"
+                                }
+                                className="text-[10px]"
+                              >
+                                {evalRes.statusLabel}
                               </Badge>
-                            ) : (
-                              <Badge variant="destructive" className="text-[10px]">
-                                {evalRes.reason}
-                              </Badge>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                              {evalRes.reason ? (
+                                <p className="mt-1 max-w-[190px] text-[10px] text-muted-foreground">
+                                  {evalRes.reason}
+                                </p>
+                              ) : null}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             ) : null}
           </TabsContent>
@@ -1105,16 +1513,51 @@ export function CustomTemplatesWorkspace({
 
                 {previewResult ? (
                   <div className="space-y-3 text-xs">
-                    <div className="flex flex-wrap items-center gap-2 rounded border border-border p-2.5">
-                      <span>
-                        <strong>Attachment:</strong>{" "}
-                        <code>{activeTemplate.attachmentFilename ?? "None"}</code> (
-                        {activeTemplate.attachmentFormat.toUpperCase()})
-                      </span>
-                      <span>•</span>
-                      <span>
-                        <strong>Subject:</strong> {previewResult.subject}
-                      </span>
+                    <div className="flex flex-wrap items-center justify-between gap-2 rounded border border-border p-2.5">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span>
+                          <strong>Generated Attachment:</strong>{" "}
+                          <code>
+                            {previewResult.resolvedAttachmentFilename ??
+                              activeTemplate.attachmentFilename ??
+                              "None"}
+                          </code>{" "}
+                          ({activeTemplate.attachmentFormat.toUpperCase()})
+                        </span>
+                        <span>•</span>
+                        <span>
+                          <strong>Subject:</strong> {previewResult.subject}
+                        </span>
+                        <Badge
+                          variant={previewResult.isVerifiedClean ? "success" : "destructive"}
+                          className="text-[10px]"
+                        >
+                          {previewResult.isVerifiedClean
+                            ? "Verified Populated"
+                            : "Blocked — Missing / Unfilled Fields"}
+                        </Badge>
+                      </div>
+                      {previewResult.personalizedAttachmentBase64 &&
+                      previewResult.resolvedAttachmentFilename ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="h-7 text-[11px]"
+                          onClick={() =>
+                            downloadBase64Attachment(
+                              previewResult.personalizedAttachmentBase64!,
+                              previewResult.resolvedAttachmentFilename!,
+                              activeTemplate.attachmentFormat === "pdf"
+                                ? "application/pdf"
+                                : "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            )
+                          }
+                        >
+                          <Download className="mr-1 size-3" />
+                          Download Preview
+                        </Button>
+                      ) : null}
                     </div>
 
                     {previewResult.pdfWarning ? (
@@ -1124,13 +1567,25 @@ export function CustomTemplatesWorkspace({
                       </div>
                     ) : null}
 
-                    {previewResult.missingPlaceholders.length > 0 ? (
-                      <div className="flex items-center gap-2 rounded border border-destructive/40 bg-destructive/10 p-2.5 text-destructive">
-                        <XCircle className="size-4 shrink-0" />
-                        <span>
-                          Missing values for required placeholders:{" "}
-                          {previewResult.missingPlaceholders.map((p) => `{{${p}}}`).join(", ")}
-                        </span>
+                    {previewResult.missingPlaceholders.length > 0 ||
+                    previewResult.unresolvedPlaceholders.length > 0 ||
+                    previewResult.remainingBlankFields.length > 0 ? (
+                      <div className="flex items-start gap-2 rounded border border-destructive/40 bg-destructive/10 p-2.5 text-destructive">
+                        <XCircle className="mt-0.5 size-4 shrink-0" />
+                        <div className="space-y-0.5">
+                          {previewResult.missingPlaceholders.length > 0 ? (
+                            <p>
+                              Missing employee values:{" "}
+                              {previewResult.missingPlaceholders.map((p) => `{{${p}}}`).join(", ")}
+                            </p>
+                          ) : null}
+                          {previewResult.remainingBlankFields.length > 0 ? (
+                            <p>
+                              Unfilled blank fields detected in document:{" "}
+                              {previewResult.remainingBlankFields.join(", ")}
+                            </p>
+                          ) : null}
+                        </div>
                       </div>
                     ) : null}
 
@@ -1449,6 +1904,97 @@ export function CustomTemplatesWorkspace({
                   ))}
                 </tbody>
               </table>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Actual Per-Recipient Personalized Document Preview Modal */}
+      <Dialog
+        open={docModal.open}
+        onOpenChange={(open) => setDocModal((prev) => ({ ...prev, open }))}
+      >
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>
+              Personalized Attachment Preview — {docModal.recipientName}
+            </DialogTitle>
+            <DialogDescription>
+              Actual generated recipient attachment:{" "}
+              <code className="font-mono text-foreground">{docModal.attachmentFilename}</code>
+            </DialogDescription>
+          </DialogHeader>
+
+          {docModal.loading ? (
+            <div className="py-12 text-center text-xs text-muted-foreground">
+              <Loader2 className="mx-auto mb-2 size-5 animate-spin text-primary" />
+              Generating personalized document for {docModal.recipientName}...
+            </div>
+          ) : (
+            <div className="space-y-3 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded border border-border p-2.5">
+                <div className="flex items-center gap-2">
+                  {docModal.isVerifiedClean && docModal.missingPlaceholders.length === 0 ? (
+                    <Badge variant="success" className="text-[10px]">
+                      Verified: Zero Unresolved Placeholders
+                    </Badge>
+                  ) : (
+                    <Badge variant="destructive" className="text-[10px]">
+                      Blocked: Incomplete / Unfilled Fields
+                    </Badge>
+                  )}
+                </div>
+                {docModal.base64Data ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    onClick={() =>
+                      downloadBase64Attachment(
+                        docModal.base64Data!,
+                        docModal.attachmentFilename,
+                        docModal.mimeType,
+                      )
+                    }
+                  >
+                    <Download className="mr-1.5 size-3.5" />
+                    Download Preview
+                  </Button>
+                ) : null}
+              </div>
+
+              {docModal.missingPlaceholders.length > 0 ||
+              docModal.remainingBlankFields.length > 0 ? (
+                <div className="rounded border border-destructive/40 bg-destructive/10 p-2.5 text-destructive space-y-1">
+                  {docModal.missingPlaceholders.length > 0 ? (
+                    <p>
+                      Missing employee values:{" "}
+                      {docModal.missingPlaceholders.map((p) => `{{${p}}}`).join(", ")}
+                    </p>
+                  ) : null}
+                  {docModal.remainingBlankFields.length > 0 ? (
+                    <p>
+                      Remaining blank fields in document:{" "}
+                      {docModal.remainingBlankFields.join(", ")}
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {docModal.mimeType === "application/pdf" && docModal.base64Data ? (
+                <iframe
+                  src={`data:application/pdf;base64,${docModal.base64Data}#toolbar=1&navpanes=0`}
+                  title={`Personalized PDF for ${docModal.recipientName}`}
+                  className="h-[460px] w-full rounded border border-border bg-white"
+                />
+              ) : (
+                <div className="max-h-[420px] overflow-auto rounded border border-border bg-white p-5 text-zinc-900 space-y-2">
+                  {docModal.docxParagraphs.map((p, idx) => (
+                    <p key={idx} className="text-xs leading-relaxed">
+                      {p}
+                    </p>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </DialogContent>

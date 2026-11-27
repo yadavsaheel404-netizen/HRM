@@ -1,4 +1,5 @@
 import { createFileRoute, redirect } from "@tanstack/react-router";
+import { isRecoveryAuthLocation } from "@/lib/app-url";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -19,6 +20,10 @@ export const Route = createFileRoute("/")({
     ],
   }),
   beforeLoad: () => {
+    if (typeof window !== "undefined" && isRecoveryAuthLocation(window.location)) {
+      window.location.replace(`/auth/reset-password${window.location.search}${window.location.hash}`);
+      return;
+    }
     throw redirect({ to: "/dashboard" });
   },
   pendingComponent: () => (

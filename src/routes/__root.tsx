@@ -144,6 +144,12 @@ function RootComponent() {
 
   useEffect(() => {
     const { data } = supabase.auth.onAuthStateChange((event) => {
+      if (event === "PASSWORD_RECOVERY") {
+        if (typeof window !== "undefined" && window.location.pathname !== "/auth/reset-password") {
+          router.navigate({ to: "/auth/reset-password", replace: true });
+        }
+        return;
+      }
       if (event !== "SIGNED_IN" && event !== "SIGNED_OUT" && event !== "USER_UPDATED") return;
       router.invalidate();
       if (event !== "SIGNED_OUT") queryClient.invalidateQueries();

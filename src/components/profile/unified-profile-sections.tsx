@@ -1153,7 +1153,7 @@ export function SelfDocumentsSection({
   const byType = new Map(documents.map((d) => [d.doc_type, d]));
 
   return (
-    <Card>
+    <Card data-focus-id="section-documents">
       <CardHeader>
         <CardTitle className="flex items-center gap-2 font-display text-base">
           <FileText className="size-4 text-primary" aria-hidden="true" /> 5. Documents &amp; KYC
@@ -1194,6 +1194,8 @@ export function SelfDocumentsSection({
             return (
               <div
                 key={docType}
+                id={doc?.status === "rejected" ? "doc-rejected" : undefined}
+                data-focus-id={doc?.id}
                 className="flex flex-wrap items-start justify-between gap-2.5 rounded-md border border-border px-3 py-2.5"
               >
                 <div className="min-w-0 flex-1 space-y-0.5">
@@ -1311,7 +1313,7 @@ export function DirectoryDocumentsSection({
   }
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6" data-focus-id="section-documents">
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 font-display text-base">
@@ -1331,6 +1333,7 @@ export function DirectoryDocumentsSection({
               return (
                 <div
                   key={doc.id}
+                  data-focus-id={doc.id}
                   className="space-y-2 rounded-md border border-border px-3 py-2.5"
                 >
                   <div className="flex flex-wrap items-start justify-between gap-2">
@@ -1434,7 +1437,7 @@ export function DirectoryDocumentsSection({
       </Card>
 
       {canVerify && (
-        <Card>
+        <Card data-focus-id="section-verification">
           <CardHeader>
             <CardTitle className="font-display text-base">Verification Decision</CardTitle>
             <CardDescription>

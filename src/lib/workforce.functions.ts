@@ -672,6 +672,37 @@ export const submitProfileForVerification = createServerFn({ method: "POST" })
       entityId: userId,
     });
 
+    try {
+      const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+      const { notify } = await import("./daily-queries.server");
+      const { data: hrRoles } = await supabaseAdmin
+        .from("user_roles")
+        .select("user_id")
+        .eq("role", "hr");
+      const recipients = Array.from(
+        new Set((hrRoles ?? []).map((r) => r.user_id).filter((id) => id && id !== userId)),
+      );
+      await Promise.all(
+        recipients.map((hrId) =>
+          notify(supabaseAdmin, {
+            userId: hrId,
+            actorId: userId,
+            type: "profile.submitted",
+            title: `${profile.full_name?.trim() || "An employee"} submitted profile for verification`,
+            body: "Open Verification & Documents to review and activate this profile.",
+            entityType: "profile",
+            entityId: userId,
+            section: "verification",
+            actionLabel: "Review Profile",
+            actionUrl: `/workforce/${userId}?section=verification`,
+            metadata: { employeeId: userId },
+          }),
+        ),
+      );
+    } catch {
+      // Non-fatal
+    }
+
     return { ok: true as const, missing: [] as string[] };
   });
 
@@ -713,6 +744,27 @@ export const reviewProfile = createServerFn({ method: "POST" })
       entityId: data.userId,
       detail: { note: data.note ?? null },
     });
+
+    try {
+      const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+      const { notify } = await import("./daily-queries.server");
+      await notify(supabaseAdmin, {
+        userId: data.userId,
+        actorId: userId,
+        type: data.approve ? "profile.verified" : "profile.returned",
+        title: data.approve
+          ? "Your employee profile has been verified"
+          : "Your profile was returned for updates",
+        body: data.note?.trim() || null,
+        entityType: "profile",
+        entityId: data.userId,
+        section: "profile",
+        actionLabel: "Open Profile",
+        actionUrl: "/onboarding?section=profile",
+      });
+    } catch {
+      // Non-fatal
+    }
 
     return { ok: true };
   });

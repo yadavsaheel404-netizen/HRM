@@ -231,6 +231,33 @@ export const createAllocation = createServerFn({ method: "POST" })
       },
     });
 
+    if (data.userId !== context.userId) {
+      try {
+        const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+        const { notify } = await import("./daily-queries.server");
+        const { data: projRow } = await supabaseAdmin
+          .from("projects")
+          .select("name, code")
+          .eq("id", data.projectId)
+          .maybeSingle();
+        const projLabel = projRow ? `${projRow.code} · ${projRow.name}` : "a project";
+        await notify(supabaseAdmin, {
+          userId: data.userId,
+          actorId: context.userId,
+          type: "allocation.assigned",
+          title: `Assigned to ${projLabel}`,
+          body: `Open My Assignments to acknowledge this allocation (${pct}%).`,
+          entityType: "project_allocation",
+          entityId: created.id,
+          actionLabel: "View Assignment",
+          actionUrl: `/my-projects?allocationId=${created.id}`,
+          metadata: { projectId: data.projectId, allocationId: created.id },
+        });
+      } catch {
+        // Non-fatal
+      }
+    }
+
     return { allocation: created, totalPct: total, overAllocated: total > 100 };
   });
 
@@ -542,7 +569,7 @@ export const acknowledgeAllocation = createServerFn({ method: "POST" })
     await requirePermission(context.supabase, context.userId, "allocations:acknowledge:self");
     const { data: existing, error: readError } = await context.supabase
       .from("project_allocations")
-      .select("id, user_id, status, acknowledged_at")
+      .select("id, user_id, project_id, allocated_by, status, acknowledged_at")
       .eq("id", data.id)
       .maybeSingle();
     if (readError) throw readError;
@@ -572,6 +599,33 @@ export const acknowledgeAllocation = createServerFn({ method: "POST" })
       entityId: data.id,
       detail: { project_id: updated.project_id, acknowledged_at: updated.acknowledged_at },
     });
+
+    if (existing.allocated_by && existing.allocated_by !== context.userId) {
+      try {
+        const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+        const { notify } = await import("./daily-queries.server");
+        const { data: empRow } = await supabaseAdmin
+          .from("profiles")
+          .select("full_name")
+          .eq("id", context.userId)
+          .maybeSingle();
+        await notify(supabaseAdmin, {
+          userId: existing.allocated_by,
+          actorId: context.userId,
+          type: "allocation.acknowledged",
+          title: `${empRow?.full_name ?? "Team member"} acknowledged project assignment`,
+          body: "Allocation is now active for work logging.",
+          entityType: "project_allocation",
+          entityId: updated.id,
+          section: "allocations",
+          actionLabel: "View Allocation",
+          actionUrl: `/projects/${updated.project_id}?section=allocations&allocationId=${updated.id}`,
+          metadata: { projectId: updated.project_id, allocationId: updated.id },
+        });
+      } catch {
+        // Non-fatal
+      }
+    }
 
     return { alreadyAcknowledged: false, allocation: updated };
   });

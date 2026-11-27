@@ -1,4 +1,4 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useSearch } from "@tanstack/react-router";
 import { useQuery, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -16,8 +16,9 @@ import {
   Video,
   XCircle,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
+import { useNotificationFocus } from "@/hooks/use-notification-focus";
 import { AccessDenied, errorToAccessScreen } from "@/components/access-denied";
 import { AppShell } from "@/components/app-shell";
 import {
@@ -146,6 +147,7 @@ function recommendationBadgeClass(rec: InterviewRecommendation): string {
 
 function InterviewsWorkspacePage() {
   useSuspenseQuery(actorQueryOptions);
+  const searchParams = useSearch({ strict: false }) as { interviewId?: string; action?: string };
   const actor = useActor();
   const queryClient = useQueryClient();
 
@@ -158,8 +160,20 @@ function InterviewsWorkspacePage() {
     enabled: allowed,
   });
 
-  const [activeTab, setActiveTab] = useState<FilterTab>("upcoming");
+  const [activeTab, setActiveTab] = useState<FilterTab>(
+    searchParams.interviewId ? "all" : "upcoming",
+  );
   const [search, setSearch] = useState("");
+
+  useEffect(() => {
+    if (searchParams.interviewId) {
+      setActiveTab("all");
+    } else if (searchParams.action === "scorecard") {
+      setActiveTab("needs_scorecard");
+    }
+  }, [searchParams.interviewId, searchParams.action]);
+
+  useNotificationFocus(searchParams.interviewId, { ready: !interviewsQuery.isLoading });
 
   // Schedule dialog state
   const [scheduleOpen, setScheduleOpen] = useState(false);
@@ -712,7 +726,7 @@ function InterviewsWorkspacePage() {
             const isActiveSlot =
               iv.status === "scheduled" || iv.status === "rescheduled";
             return (
-              <Card key={iv.id}>
+              <Card key={iv.id} data-focus-id={iv.id}>
                 <CardContent className="pt-5">
                   <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
                     <div className="space-y-2">

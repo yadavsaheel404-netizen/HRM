@@ -1,7 +1,22 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { requirePermission } from "./actor.server";
-import { canAccessEmployeeDocuments } from "./permissions";
+import {
+  canAccessEmployeeDocuments,
+  DOCUMENT_TYPE_LABELS,
+  isValidOwnedDocumentPath,
+  type DocumentType,
+} from "./permissions";
+
+function isStoragePrivilegeError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const msg = String((error as { message?: string }).message ?? "");
+  const code = String((error as { code?: string; statusCode?: string }).code ?? (error as { statusCode?: string }).statusCode ?? "");
+  return (
+    code === "42501" ||
+    /relieving_cases|permission denied/i.test(msg)
+  );
+}
 
 async function assertCanAccessDocumentOwner(
   supabase: Parameters<typeof requirePermission>[0],
@@ -80,13 +95,17 @@ export const registerDocument = createServerFn({ method: "POST" })
       .eq("user_id", context.userId)
       .eq("doc_type", data.docType as never);
 
-    const { error } = await context.supabase.from("documents").insert({
-      user_id: context.userId,
-      doc_type: data.docType as never,
-      file_path: data.path,
-      file_name: data.fileName,
-      status: "pending",
-    });
+    const { data: insertedDoc, error } = await context.supabase
+      .from("documents")
+      .insert({
+        user_id: context.userId,
+        doc_type: data.docType as never,
+        file_path: data.path,
+        file_name: data.fileName,
+        status: "pending",
+      })
+      .select("id")
+      .single();
     if (error) throw error;
 
     const { writeAudit } = await import("./audit.server");
@@ -97,6 +116,49 @@ export const registerDocument = createServerFn({ method: "POST" })
       entityId: data.path,
       detail: { docType: data.docType },
     });
+
+    // Notify HR reviewers with direct deep link to Employee Profile -> Documents
+    try {
+      const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+      const { notify } = await import("./daily-queries.server");
+      const [{ data: uploader }, { data: hrRoles }] = await Promise.all([
+        supabaseAdmin.from("profiles").select("full_name").eq("id", context.userId).maybeSingle(),
+        supabaseAdmin.from("user_roles").select("user_id").eq("role", "hr"),
+      ]);
+      const empName = uploader?.full_name?.trim() || "An employee";
+      const docLabel = DOCUMENT_TYPE_LABELS[data.docType as DocumentType] ?? "KYC Document";
+      const docId = insertedDoc?.id ?? null;
+      const actionUrl = docId
+        ? `/workforce/${context.userId}?section=documents&docId=${docId}`
+        : `/workforce/${context.userId}?section=documents`;
+      const recipients = Array.from(
+        new Set((hrRoles ?? []).map((r) => r.user_id).filter((id) => id && id !== context.userId)),
+      );
+      await Promise.all(
+        recipients.map((hrId) =>
+          notify(supabaseAdmin, {
+            userId: hrId,
+            actorId: context.userId,
+            type: "kyc.submitted",
+            title: `${empName} uploaded ${docLabel}`,
+            body: "Document uploaded and pending KYC review.",
+            entityType: "document",
+            entityId: docId,
+            section: "documents",
+            actionLabel: "Review Documents",
+            actionUrl,
+            metadata: {
+              employeeId: context.userId,
+              docType: data.docType,
+              ...(docId ? { docId } : {}),
+            },
+          }),
+        ),
+      );
+    } catch {
+      // In-app notification delivery is best-effort and must never fail upload registration.
+    }
+
     // Resubmission after a correction request → "under review" in-app notice.
     const { drainKycNotificationsSafely } = await import("./kyc/kyc-notifications.server");
     await drainKycNotificationsSafely(context.userId);
@@ -120,10 +182,34 @@ export const getDocumentDownloadUrl = createServerFn({ method: "POST" })
 
     await assertCanAccessDocumentOwner(context.supabase, context.userId, doc.user_id);
 
+    if (!isValidOwnedDocumentPath(doc.user_id, doc.file_path)) {
+      throw new Error("Invalid document path.");
+    }
+
+    let signedUrl: string | null = null;
     const { data: signed, error: signError } = await context.supabase.storage
       .from("employee-documents")
       .createSignedUrl(doc.file_path, 120);
-    if (signError) throw signError;
+
+    if (signError) {
+      // Fallback only when authorization already succeeded above and Storage RLS hits an
+      // unrelated SQL grant error (e.g. legacy relieving_cases storage policy before migration).
+      if (!isStoragePrivilegeError(signError)) {
+        throw signError;
+      }
+      const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+      const { data: adminSigned, error: adminErr } = await supabaseAdmin.storage
+        .from("employee-documents")
+        .createSignedUrl(doc.file_path, 120);
+      if (adminErr) throw adminErr;
+      signedUrl = adminSigned?.signedUrl ?? null;
+    } else {
+      signedUrl = signed?.signedUrl ?? null;
+    }
+
+    if (!signedUrl) {
+      throw new Error("Could not generate a signed document URL.");
+    }
 
     if (context.userId !== doc.user_id) {
       const { writeAudit } = await import("./audit.server");
@@ -136,7 +222,7 @@ export const getDocumentDownloadUrl = createServerFn({ method: "POST" })
       });
     }
 
-    return { url: signed.signedUrl };
+    return { url: signedUrl };
   });
 
 export const reviewDocument = createServerFn({ method: "POST" })

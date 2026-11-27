@@ -389,7 +389,10 @@ export async function runAutomation(trigger: string): Promise<AutomationResult> 
       const leads = await resolveLeads([...new Set(notifyDrafts.map((d) => d.user_id))]);
 
       const notifications: Record<string, unknown>[] = [];
+      const isTaskRule = (rule: string) =>
+        ["task_entry_reminder", "uncovered_time", "high_rejection", "low_productivity"].includes(rule);
       for (const d of notifyDrafts) {
+        const section = d.rule === "eod_locked" ? "eod" : isTaskRule(d.rule) ? "tasks" : "attendance";
         if (d.notifyUser) {
           notifications.push({
             user_id: d.user_id,
@@ -398,10 +401,15 @@ export async function runAutomation(trigger: string): Promise<AutomationResult> 
             body: d.message,
             entity_type: "automation_flag",
             entity_id: d.day_id,
+            section,
+            action_label: isTaskRule(d.rule) ? "Open My Tasks" : "Open My Day",
+            action_url: `/my-day?section=${section}&date=${d.work_date}`,
+            metadata: { employeeId: d.user_id, workDate: d.work_date, rule: d.rule },
           });
         }
         const lead = leads.get(d.user_id);
         if (d.notifyLead && lead && lead !== d.user_id) {
+          const toReviews = isTaskRule(d.rule);
           notifications.push({
             user_id: lead,
             type: `automation:${d.rule}`,
@@ -410,11 +418,32 @@ export async function runAutomation(trigger: string): Promise<AutomationResult> 
             actor_id: d.user_id,
             entity_type: "automation_flag",
             entity_id: d.day_id,
+            section: toReviews ? "reviews" : section,
+            action_label: toReviews ? "Open Reviews" : "Inspect Attendance",
+            action_url: toReviews
+              ? `/reviews?date=${d.work_date}&employeeId=${d.user_id}`
+              : `/team?employeeId=${d.user_id}&date=${d.work_date}&section=${section}`,
+            metadata: { employeeId: d.user_id, workDate: d.work_date, rule: d.rule },
           });
         }
       }
       if (notifications.length > 0) {
-        await supabaseAdmin.from("notifications").insert(notifications as never);
+        const { error: notifErr } = await supabaseAdmin
+          .from("notifications")
+          .insert(notifications as never);
+        if (notifErr) {
+          // Graceful pre-migration fallback if deep-link columns are absent
+          const baseRows = notifications.map(({ user_id, actor_id, type, title, body, entity_type, entity_id }) => ({
+            user_id,
+            ...(actor_id ? { actor_id } : {}),
+            type,
+            title,
+            body,
+            entity_type,
+            entity_id,
+          }));
+          await supabaseAdmin.from("notifications").insert(baseRows as never);
+        }
         notificationsSent = notifications.length;
       }
     }

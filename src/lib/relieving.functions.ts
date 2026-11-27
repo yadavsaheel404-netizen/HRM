@@ -379,6 +379,43 @@ export const saveRelievingCase = createServerFn({ method: "POST" })
       },
     });
 
+    if (payload.status === "pending_approval" && resultId) {
+      try {
+        const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+        const { notify } = await import("./daily-queries.server");
+        const { data: approverRoles } = await supabaseAdmin
+          .from("user_roles")
+          .select("user_id")
+          .in("role", ["hr", "super_admin"]);
+        const recipients = Array.from(
+          new Set(
+            (approverRoles ?? [])
+              .map((r) => r.user_id)
+              .filter((id) => id && id !== context.userId && id !== data.userId),
+          ),
+        );
+        await Promise.all(
+          recipients.map((approverId) =>
+            notify(supabaseAdmin, {
+              userId: approverId,
+              actorId: context.userId,
+              type: "relieving.pending_approval",
+              title: `Relieving case awaiting approval: ${data.employeeName}`,
+              body: `Effective date ${data.relievingEffectiveDate}. Open Employee Relieving to review.`,
+              entityType: "relieving_case",
+              entityId: resultId!,
+              section: "pending_approval",
+              actionLabel: "Review Case",
+              actionUrl: `/employee-relieving?caseId=${resultId}&tab=pending_approval`,
+              metadata: { employeeId: data.userId },
+            }),
+          ),
+        );
+      } catch {
+        // Non-fatal
+      }
+    }
+
     return { id: resultId };
   });
 
@@ -520,6 +557,25 @@ export const finalizeAndRelieveEmployee = createServerFn({ method: "POST" })
 
     const { syncProfileToEmployeeRecordSafe } = await import("./records/sync.server");
     await syncProfileToEmployeeRecordSafe(row.user_id, context.userId);
+
+    try {
+      const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+      const { notify } = await import("./daily-queries.server");
+      await notify(supabaseAdmin, {
+        userId: row.user_id,
+        actorId: context.userId,
+        type: "relieving.letter_issued",
+        title: "Experience & Relieving Letter issued",
+        body: "Your relieving process is finalized. Open to view your official letter.",
+        entityType: "relieving_case",
+        entityId: row.id,
+        section: "relieved",
+        actionLabel: "View Letter",
+        actionUrl: `/employee-relieving?caseId=${row.id}&tab=relieved`,
+      });
+    } catch {
+      // Non-fatal
+    }
 
     return { ok: true, storagePath };
   });

@@ -191,6 +191,10 @@ export const reviewEodReport = createServerFn({ method: "POST" })
       body: `${action.replace(/_/g, " ")}${data.note?.trim() ? `: ${data.note.trim()}` : ""}`,
       entityType: "eod_report",
       entityId: report.id,
+      section: "eod",
+      actionLabel: "Open EOD",
+      actionUrl: `/my-day?section=eod&eodId=${report.id}`,
+      metadata: { workDate: report.work_date, action },
     });
 
     await writeAudit(supabase, {

@@ -1,4 +1,13 @@
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
+import { useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import { useActor } from "@/hooks/use-actor";
+import { resolveNotificationDestinationServer } from "@/lib/daily.functions";
+import {
+  resolveNotificationLink,
+  UNAVAILABLE_TARGET_MESSAGE,
+  type NotificationRow,
+} from "@/lib/notifications/navigation";
 import {
   AlertTriangle,
   ArrowRight,
@@ -1151,16 +1160,52 @@ export function NotificationsSummaryCard({
   onMarkRead,
 }: {
   unreadCount: number;
-  items: {
+  items: ({
     id: string;
     title: string;
     body: string | null;
     read_at: string | null;
     created_at: string;
-  }[];
+  } & Partial<NotificationRow>)[];
   markingNotificationId?: string | null | undefined;
   onMarkRead?: ((id: string) => void) | undefined;
 }) {
+  const actor = useActor();
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+
+  async function handleOpen(raw: (typeof items)[number]) {
+    const row: NotificationRow = {
+      user_id: actor.userId,
+      type: raw.type ?? "",
+      ...raw,
+    };
+    const localResolved = resolveNotificationLink(row, actor);
+    try {
+      const serverRes = await resolveNotificationDestinationServer({
+        data: { id: raw.id, markRead: !raw.read_at },
+      });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["my-notifications"] }),
+        queryClient.invalidateQueries({ queryKey: ["role-dashboard"] }),
+      ]);
+      if (serverRes.unavailable) {
+        toast.info(serverRes.unavailableMessage || UNAVAILABLE_TARGET_MESSAGE);
+        await navigate({ to: (serverRes.fallbackTo || "/dashboard") as never });
+        return;
+      }
+      await navigate({ to: serverRes.to as never, search: serverRes.search as never });
+    } catch {
+      if (!raw.read_at && onMarkRead) onMarkRead(raw.id);
+      if (localResolved.unavailable) {
+        toast.info(localResolved.unavailableMessage || UNAVAILABLE_TARGET_MESSAGE);
+        await navigate({ to: (localResolved.fallbackTo || "/dashboard") as never });
+      } else {
+        await navigate({ to: localResolved.to as never, search: localResolved.search as never });
+      }
+    }
+  }
+
   return (
     <Card>
       <CardHeader className="pb-3">
@@ -1186,12 +1231,20 @@ export function NotificationsSummaryCard({
           <ul className="divide-y divide-border">
             {items.slice(0, 6).map((n) => {
               const isMarking = markingNotificationId === n.id;
+              const resolved = resolveNotificationLink(
+                { user_id: actor.userId, type: n.type ?? "", ...n },
+                actor,
+              );
               return (
                 <li
                   key={n.id}
                   className="flex items-start justify-between gap-3 py-2.5 first:pt-0 last:pb-0"
                 >
-                  <div className="min-w-0 space-y-0.5">
+                  <button
+                    type="button"
+                    onClick={() => void handleOpen(n)}
+                    className="min-w-0 flex-1 space-y-0.5 text-left rounded-sm hover:bg-accent/50 p-1 -m-1 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
                     <div className="flex items-center gap-1.5">
                       {!n.read_at && (
                         <span
@@ -1213,7 +1266,8 @@ export function NotificationsSummaryCard({
                     {n.body && (
                       <p className="line-clamp-1 text-xs text-muted-foreground">{n.body}</p>
                     )}
-                  </div>
+                    <p className="text-[11px] font-medium text-primary">{resolved.label} →</p>
+                  </button>
                   <div className="flex shrink-0 items-center gap-2">
                     <span className="font-mono text-[11px] text-muted-foreground">
                       {formatIstShortDate(n.created_at)}

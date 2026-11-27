@@ -485,7 +485,7 @@ export const updateCandidateStage = createServerFn({ method: "POST" })
 
     const { data: current, error: loadErr } = await supabase
       .from("candidates")
-      .select("id, status, converted_invitation_id, converted_user_id")
+      .select("id, full_name, status, assigned_hr_id, converted_invitation_id, converted_user_id")
       .eq("id", data.candidateId)
       .maybeSingle();
 
@@ -525,6 +525,27 @@ export const updateCandidateStage = createServerFn({ method: "POST" })
       entityId: data.candidateId,
       detail: { from: current.status, to: check.toStatus, note: data.note ?? null },
     });
+
+    if (current.assigned_hr_id && current.assigned_hr_id !== userId) {
+      try {
+        const { notify } = await import("./daily-queries.server");
+        await notify(supabase, {
+          userId: current.assigned_hr_id,
+          actorId: userId,
+          type: "candidate.status_changed",
+          title: `Candidate moved to ${check.toStatus.replace(/_/g, " ")}: ${current.full_name}`,
+          body: data.note?.trim() || null,
+          entityType: "candidate",
+          entityId: data.candidateId,
+          section: "timeline",
+          actionLabel: "View Candidate",
+          actionUrl: `/candidates/${data.candidateId}?section=timeline`,
+          metadata: { status: check.toStatus },
+        });
+      } catch {
+        // Non-fatal
+      }
+    }
 
     return { ok: true, status: check.toStatus };
   });

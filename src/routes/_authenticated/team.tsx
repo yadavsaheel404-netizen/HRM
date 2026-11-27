@@ -1,6 +1,6 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useSearch } from "@tanstack/react-router";
 import { useQuery, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import {
   Download,
   RefreshCw,
@@ -71,17 +71,31 @@ type DatePreset = "today" | "yesterday" | "last_7_days" | "last_14_days" | "cust
 
 function TeamAttendanceMonitoringPage() {
   const actor = useActor();
+  const searchParams = useSearch({ strict: false }) as {
+    employeeId?: string;
+    date?: string;
+    section?: string;
+    eodId?: string;
+    blockerId?: string;
+  };
   const queryClient = useQueryClient();
   const canReviewEod = actor.can("eod:review:team");
   const canManageBlockers = actor.can("blockers:manage:team");
 
   // Date range state
   const todayStr = useMemo(() => todayIso(new Date()), []);
-  const [preset, setPreset] = useState<DatePreset>("today");
+  const [preset, setPreset] = useState<DatePreset>(searchParams.date ? "custom" : "today");
   const [range, setRange] = useState<{ from: string; to: string }>({
-    from: todayStr,
-    to: todayStr,
+    from: searchParams.date || todayStr,
+    to: searchParams.date || todayStr,
   });
+
+  useEffect(() => {
+    if (searchParams.date) {
+      setPreset("custom");
+      setRange({ from: searchParams.date, to: searchParams.date });
+    }
+  }, [searchParams.date]);
 
   function applyPreset(p: DatePreset) {
     setPreset(p);
@@ -110,6 +124,12 @@ function TeamAttendanceMonitoringPage() {
 
   // Selected employee for Slide-over detail drawer
   const [selectedRow, setSelectedRow] = useState<OversightRow | null>(null);
+
+  useEffect(() => {
+    if (!searchParams.employeeId) return;
+    const hit = data.rows.find((r) => r.userId === searchParams.employeeId);
+    if (hit) setSelectedRow(hit);
+  }, [searchParams.employeeId, data.rows]);
 
   // Filter state
   const [search, setSearch] = useState<string>("");

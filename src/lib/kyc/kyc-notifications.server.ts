@@ -120,13 +120,37 @@ function kindForEvent(eventType: KycEventType): KycEmailKind | null {
 
 async function notifyInApp(userId: string, kind: keyof typeof KYC_NOTIFICATIONS, outboxId: string) {
   const n = KYC_NOTIFICATIONS[kind];
-  await supabaseAdmin.from("notifications").insert({
+  const isCorrection = kind === "correction";
+  const actionUrl = isCorrection
+    ? "/onboarding?section=documents&filter=rejected"
+    : "/onboarding?section=documents";
+  const actionLabel = isCorrection
+    ? "Fix Documents"
+    : kind === "verified"
+      ? "View KYC Status"
+      : "View Documents";
+
+  const { error } = await db.from("notifications").insert({
     user_id: userId,
     type: n.type,
     title: n.title,
     entity_type: "kyc",
     entity_id: outboxId,
+    section: "documents",
+    action_label: actionLabel,
+    action_url: actionUrl,
+    metadata: { kycKind: kind, filter: isCorrection ? "rejected" : "all" },
   });
+
+  if (error && isMissingSchemaResourceError(error)) {
+    await supabaseAdmin.from("notifications").insert({
+      user_id: userId,
+      type: n.type,
+      title: n.title,
+      entity_type: "kyc",
+      entity_id: outboxId,
+    });
+  }
 }
 
 async function finish(id: string, patch: Record<string, unknown>) {

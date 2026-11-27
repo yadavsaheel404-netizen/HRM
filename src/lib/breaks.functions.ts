@@ -111,6 +111,10 @@ export const requestPersonalizedBreak = createServerFn({ method: "POST" })
         body: `An employee has requested a personalized break (${data.totalMinutes} mins). HR approval required.`,
         entityType: "break_request",
         entityId: reqRow.id,
+        section: "breaks",
+        actionLabel: "Review Break",
+        actionUrl: `/requests?section=breaks&breakRequestId=${reqRow.id}`,
+        metadata: { workDate, employeeId: userId },
       });
     }
 
@@ -225,6 +229,10 @@ export const decidePersonalizedBreak = createServerFn({ method: "POST" })
           : `Your personalized break request was rejected by HR.${data.note ? ` Note: ${data.note}` : ""}`,
       entityType: "break_request",
       entityId: reqRow.id,
+      section: "breaks",
+      actionLabel: "Open Break",
+      actionUrl: `/my-day?section=breaks&breakRequestId=${reqRow.id}`,
+      metadata: { workDate: reqRow.work_date, decision: data.decision },
     });
 
     return { request: updated };

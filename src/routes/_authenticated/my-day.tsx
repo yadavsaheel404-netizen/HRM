@@ -1,4 +1,4 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useSearch } from "@tanstack/react-router";
 import { useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -21,6 +21,7 @@ import { readBrowserPosition, requiresLocation } from "@/lib/geo";
 import { requiresAllocationForCheckIn } from "@/lib/work-type";
 import { AppShell } from "@/components/app-shell";
 import { actorQueryOptions, useActor } from "@/hooks/use-actor";
+import { useNotificationFocus } from "@/hooks/use-notification-focus";
 import { errorToAccessScreen } from "@/components/access-denied";
 import { ATTENDANCE_STATUS_LABELS } from "@/lib/daily.server";
 import {
@@ -151,6 +152,17 @@ function localInput(date: Date) {
 
 function MyDayPage() {
   const actor = useActor();
+  const search = useSearch({ strict: false }) as {
+    section?: string;
+    date?: string;
+    entryId?: string;
+    breakRequestId?: string;
+    eodId?: string;
+    blockerId?: string;
+  };
+  useNotificationFocus(
+    search.section ? `section-${search.section}` : null,
+  );
   const isManagementRole = actor.roles.some(
     (r) => r === "manager" || r === "admin" || r === "super_admin" || r === "hr",
   );
@@ -374,7 +386,10 @@ function MyDayPage() {
       <div className="space-y-6">
         {/* 1. Daily Attendance & Hourly Activity Logging */}
         <div className="grid gap-5 lg:grid-cols-3">
-          <Card className={canLogHourly || day.entries.length > 0 ? "lg:col-span-1" : "lg:col-span-3"}>
+          <Card
+            data-focus-id="section-attendance"
+            className={canLogHourly || day.entries.length > 0 ? "lg:col-span-1" : "lg:col-span-3"}
+          >
           <CardHeader className="pb-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <CardTitle className="flex items-center gap-2 text-base">
@@ -527,7 +542,7 @@ function MyDayPage() {
         </Card>
 
         {(canLogHourly || day.entries.length > 0) && (
-          <Card className="lg:col-span-2">
+          <Card data-focus-id="section-tasks" className="lg:col-span-2">
           <CardHeader>
             <CardTitle className="text-base">Hourly annotation logs</CardTitle>
             <CardDescription>
@@ -969,17 +984,19 @@ function MyDayPage() {
       </div>
 
       {/* 2. Daily Breaks Section — Full Width Approved Component */}
-      <BreakTracker
-        breaks={day.breaks as any}
-        breakRequests={(day as any).breakRequests ?? []}
-        checkedIn={checkedIn}
-        checkedOut={checkedOut}
-        workDate={day.workDate}
-        onRefresh={refresh}
-      />
+      <div data-focus-id="section-breaks">
+        <BreakTracker
+          breaks={day.breaks as any}
+          breakRequests={(day as any).breakRequests ?? []}
+          checkedIn={checkedIn}
+          checkedOut={checkedOut}
+          workDate={day.workDate}
+          onRefresh={refresh}
+        />
+      </div>
 
       {/* 3. Blockers Section */}
-      <Card className="w-full">
+      <Card data-focus-id="section-blockers" className="w-full">
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
             <OctagonAlert className="size-4" /> Blockers
@@ -1123,7 +1140,7 @@ function MyDayPage() {
         </Card>
 
       {/* 4. End of Day Report */}
-      <Card className="w-full">
+      <Card data-focus-id="section-eod" className="w-full">
           <CardHeader>
             <CardTitle className="text-base">End-of-day report</CardTitle>
             <CardDescription>

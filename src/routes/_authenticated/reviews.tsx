@@ -1,10 +1,11 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useSearch } from "@tanstack/react-router";
 import { useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { AppShell } from "@/components/app-shell";
 import { HubSubNav, OVERSIGHT_HUB_TABS } from "@/components/hub-subnav";
 import { actorQueryOptions, useActor } from "@/hooks/use-actor";
+import { useNotificationFocus } from "@/hooks/use-notification-focus";
 import { errorToAccessScreen } from "@/components/access-denied";
 import { listTeamEntries, reviewTaskEntry } from "@/lib/daily.functions";
 import {
@@ -55,13 +56,22 @@ function entryBadgeVariant(status: string): "success" | "info" | "warning" | "ne
 
 function ReviewsPage() {
   const actor = useActor();
+  const search = useSearch({ strict: false }) as {
+    date?: string;
+    entryId?: string;
+    employeeId?: string;
+  };
   const canReview = actor.can("tasks:review:team");
   const queryClient = useQueryClient();
-  const [selectedDate, setSelectedDate] = useState<string>("");
+  const [selectedDate, setSelectedDate] = useState<string>(search.date ?? "");
+  useEffect(() => {
+    if (search.date) setSelectedDate(search.date);
+  }, [search.date]);
   const { data } = useSuspenseQuery({
     queryKey: ["team-entries", selectedDate || "today"],
     queryFn: () => listTeamEntries({ data: selectedDate ? { date: selectedDate } : {} }),
   });
+  useNotificationFocus(search.entryId);
   const [draft, setDraft] = useState<Record<string, { approved: string; rejected: string; note: string }>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [confirmRevision, setConfirmRevision] = useState<{
@@ -136,7 +146,11 @@ function ReviewsPage() {
             const project = entry.projects as { code?: string; task_unit?: string } | null;
             const d = draft[entry.id] ?? { approved: "", rejected: "", note: "" };
             return (
-              <div key={entry.id} className="space-y-2.5 rounded-md border p-3 text-sm">
+              <div
+                key={entry.id}
+                data-focus-id={entry.id}
+                className="space-y-2.5 rounded-md border p-3 text-sm"
+              >
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <p className="font-medium">
                     {person?.full_name ?? "Team member"} · {project?.code ?? "—"} ·{" "}

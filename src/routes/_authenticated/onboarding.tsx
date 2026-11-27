@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useSearch } from "@tanstack/react-router";
 import { useQuery, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { actorQueryOptions, useActor } from "@/hooks/use-actor";
+import { useNotificationFocus } from "@/hooks/use-notification-focus";
 import { supabase } from "@/integrations/supabase/client";
 import {
   createDocumentUploadUrl,
@@ -90,6 +91,7 @@ function buildPersonalForm(profile: {
 
 function OnboardingPage() {
   const actor = useActor();
+  const search = useSearch({ strict: false }) as { section?: string; filter?: string; docId?: string };
   const queryClient = useQueryClient();
   const { data } = useSuspenseQuery({
     queryKey: ["my-unified-profile", actor.userId],
@@ -108,6 +110,16 @@ function OnboardingPage() {
     queryFn: () => listMyDocuments(),
     enabled: canUploadSelf,
   });
+
+  useNotificationFocus(
+    search.docId ||
+      (search.filter === "rejected"
+        ? "doc-rejected"
+        : search.section
+          ? `section-${search.section}`
+          : null),
+    { ready: !canUploadSelf || !docsQuery.isPending },
+  );
 
   const [savingPersonal, setSavingPersonal] = useState(false);
   const [submittingVerification, setSubmittingVerification] = useState(false);

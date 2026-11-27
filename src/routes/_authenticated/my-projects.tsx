@@ -1,10 +1,11 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useSearch } from "@tanstack/react-router";
 import { useSuspenseQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
 import { ArrowRight, CheckCircle2, ClipboardCheck } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { actorQueryOptions, useActor } from "@/hooks/use-actor";
+import { useNotificationFocus } from "@/hooks/use-notification-focus";
 import { errorToAccessScreen } from "@/components/access-denied";
 import { acknowledgeAllocation, listMyAllocations } from "@/lib/allocations.functions";
 import { Button } from "@/components/ui/button";
@@ -38,12 +39,14 @@ export const Route = createFileRoute("/_authenticated/my-projects")({
 
 function MyProjectsPage() {
   const actor = useActor();
+  const search = useSearch({ strict: false }) as { allocationId?: string };
   const canAcknowledge = actor.can("allocations:acknowledge:self");
   const queryClient = useQueryClient();
   const { data: allocations } = useSuspenseQuery({
     queryKey: ["my-allocations"],
     queryFn: () => listMyAllocations(),
   });
+  useNotificationFocus(search.allocationId);
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
 
@@ -97,7 +100,7 @@ function MyProjectsPage() {
             } | null;
             const acknowledged = Boolean(a.acknowledged_at);
             return (
-              <Card key={a.id} data-testid="assignment-card">
+              <Card key={a.id} data-focus-id={a.id} data-testid="assignment-card">
                 <CardHeader className="pb-3">
                   <div className="flex items-start justify-between gap-3">
                     <div className="min-w-0">

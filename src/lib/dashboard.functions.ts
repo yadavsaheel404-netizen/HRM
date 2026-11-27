@@ -208,7 +208,7 @@ export const getRoleDashboard = createServerFn({ method: "GET" })
             .limit(6),
       supabase
         .from("notifications")
-        .select("id, type, title, body, read_at, created_at")
+        .select("*")
         .eq("user_id", userId)
         .order("created_at", { ascending: false })
         .limit(8),

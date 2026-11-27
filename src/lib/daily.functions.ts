@@ -447,6 +447,35 @@ export const saveTaskEntry = createServerFn({ method: "POST" })
       entityId: row.id,
       detail: { status: row.status, units: row.units_completed, project_id: row.project_id },
     });
+
+    if (row.status === "submitted") {
+      try {
+        const { leadId } = await resolveWorkLead(supabase, userId, allocation.id, allocation.project_id);
+        if (leadId && leadId !== userId) {
+          const { data: me } = await supabase
+            .from("profiles")
+            .select("full_name")
+            .eq("id", userId)
+            .maybeSingle();
+          const workDate = todayIso();
+          await notify(supabase, {
+            userId: leadId,
+            actorId: userId,
+            type: "task_entry.submitted",
+            title: `${me?.full_name ?? "A team member"} submitted a task entry`,
+            body: `${row.units_completed ?? 0} units logged for review.`,
+            entityType: "task_entry",
+            entityId: row.id,
+            actionLabel: "Review Task",
+            actionUrl: `/reviews?entryId=${row.id}&date=${workDate}&employeeId=${userId}`,
+            metadata: { workDate, employeeId: userId },
+          });
+        }
+      } catch {
+        // Non-fatal
+      }
+    }
+
     return { entry: row };
   });
 
@@ -459,7 +488,7 @@ export const submitTaskEntry = createServerFn({ method: "POST" })
   .handler(async ({ data, context }) => {
     const { data: existingEntry } = await context.supabase
       .from("task_entries")
-      .select("project_id")
+      .select("project_id, allocation_id")
       .eq("id", data.id)
       .eq("user_id", context.userId)
       .maybeSingle();
@@ -486,6 +515,38 @@ export const submitTaskEntry = createServerFn({ method: "POST" })
       entityId: data.id,
       detail: { units: row.units_completed },
     });
+
+    try {
+      const { leadId } = await resolveWorkLead(
+        context.supabase,
+        context.userId,
+        existingEntry.allocation_id,
+        existingEntry.project_id,
+      );
+      if (leadId && leadId !== context.userId) {
+        const { data: me } = await context.supabase
+          .from("profiles")
+          .select("full_name")
+          .eq("id", context.userId)
+          .maybeSingle();
+        const workDate = todayIso();
+        await notify(context.supabase, {
+          userId: leadId,
+          actorId: context.userId,
+          type: "task_entry.submitted",
+          title: `${me?.full_name ?? "A team member"} submitted a task entry`,
+          body: `${row.units_completed ?? 0} units logged for review.`,
+          entityType: "task_entry",
+          entityId: row.id,
+          actionLabel: "Review Task",
+          actionUrl: `/reviews?entryId=${row.id}&date=${workDate}&employeeId=${context.userId}`,
+          metadata: { workDate, employeeId: context.userId },
+        });
+      }
+    } catch {
+      // Non-fatal
+    }
+
     return { entry: row };
   });
 
@@ -604,6 +665,10 @@ export const raiseBlocker = createServerFn({ method: "POST" })
         body: data.description.trim(),
         entityType: "blocker",
         entityId: row.id,
+        section: "blockers",
+        actionLabel: "Review Blocker",
+        actionUrl: `/team?employeeId=${userId}&blockerId=${row.id}&section=blockers`,
+        metadata: { employeeId: userId },
       });
     }
 
@@ -673,6 +738,9 @@ export const resolveBlocker = createServerFn({ method: "POST" })
         body: data.note?.trim() || row.description,
         entityType: "blocker",
         entityId: row.id,
+        section: "blockers",
+        actionLabel: "View Blocker",
+        actionUrl: `/my-day?section=blockers&blockerId=${row.id}`,
       });
     }
 
@@ -851,6 +919,7 @@ export const saveEodReport = createServerFn({ method: "POST" })
           .select("full_name")
           .eq("id", userId)
           .maybeSingle();
+        const workDate = todayIso();
         await notify(supabase, {
           userId: leadId,
           actorId: userId,
@@ -862,6 +931,10 @@ export const saveEodReport = createServerFn({ method: "POST" })
               : "General EOD report submitted.",
           entityType: "eod_report",
           entityId: row.id,
+          section: "eod",
+          actionLabel: "Review EOD",
+          actionUrl: `/team?employeeId=${userId}&eodId=${row.id}&section=eod&date=${workDate}`,
+          metadata: { employeeId: userId, workDate },
         });
       }
       await writeAudit(supabase, {
@@ -967,6 +1040,9 @@ export const reviewTaskEntry = createServerFn({ method: "POST" })
       body: data.note?.trim() || null,
       entityType: "task_entry",
       entityId: row.id,
+      section: "tasks",
+      actionLabel: "View Task Log",
+      actionUrl: `/my-day?section=tasks&entryId=${row.id}`,
     });
     await writeAudit(supabase, {
       actorId: userId,
@@ -981,14 +1057,36 @@ export const reviewTaskEntry = createServerFn({ method: "POST" })
 export const listMyNotifications = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
   .handler(async ({ context }) => {
-    const { data, error } = await context.supabase
-      .from("notifications")
-      .select("*")
-      .eq("user_id", context.userId)
-      .order("created_at", { ascending: false })
-      .limit(50);
+    const { loadActor } = await import("./actor.server");
+    const { loadProtectedAccountIds } = await import("./work-type.server");
+    const [actor, protectedIds, { data, error }] = await Promise.all([
+      loadActor(context.supabase, context.userId),
+      loadProtectedAccountIds(context.supabase),
+      context.supabase
+        .from("notifications")
+        .select("*")
+        .eq("user_id", context.userId)
+        .order("created_at", { ascending: false })
+        .limit(50),
+    ]);
     if (error) throw error;
-    return data ?? [];
+    const isSuperAdmin = actor.roles.includes("super_admin");
+    return (data ?? []).map((row: any) => {
+      const meta = (row.metadata ?? {}) as Record<string, unknown>;
+      const empId = typeof meta["employeeId"] === "string" ? meta["employeeId"] : null;
+      const isProtected =
+        !isSuperAdmin &&
+        ((row.actor_id && protectedIds.has(row.actor_id)) ||
+          (empId && protectedIds.has(empId)) ||
+          (row.entity_type === "profile" && row.entity_id && protectedIds.has(row.entity_id)));
+      if (!isProtected) return row;
+      return {
+        ...row,
+        actor_id: null,
+        action_url: null,
+        metadata: { ...meta, employeeId: null, protectedSubject: true },
+      };
+    });
   });
 
 export const markNotificationRead = createServerFn({ method: "POST" })
@@ -1005,6 +1103,157 @@ export const markNotificationRead = createServerFn({ method: "POST" })
       .eq("user_id", context.userId);
     if (error) throw error;
     return { ok: true };
+  });
+
+export const markAllNotificationsRead = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    const { error } = await context.supabase
+      .from("notifications")
+      .update({ read_at: new Date().toISOString() })
+      .eq("user_id", context.userId)
+      .is("read_at", null);
+    if (error) throw error;
+    return { ok: true };
+  });
+
+export const resolveNotificationDestinationServer = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((input: { id: string; markRead?: boolean }) => {
+    if (!input?.id) throw new Error("A notification id is required.");
+    return { id: String(input.id), markRead: input.markRead !== false };
+  })
+  .handler(async ({ data, context }) => {
+    const { loadActor } = await import("./actor.server");
+    const { loadProtectedAccountIds } = await import("./work-type.server");
+    const { resolveNotificationLink, UNAVAILABLE_TARGET_MESSAGE } = await import(
+      "./notifications/navigation"
+    );
+
+    const [actor, protectedIds, { data: row, error }] = await Promise.all([
+      loadActor(context.supabase, context.userId),
+      loadProtectedAccountIds(context.supabase),
+      context.supabase
+        .from("notifications")
+        .select("*")
+        .eq("id", data.id)
+        .eq("user_id", context.userId)
+        .maybeSingle(),
+    ]);
+
+    if (error) throw error;
+    if (!row) {
+      return {
+        ok: false as const,
+        unavailable: true,
+        unavailableMessage: UNAVAILABLE_TARGET_MESSAGE,
+        to: "/dashboard",
+        search: {} as Record<string, string>,
+        fallbackTo: "/dashboard",
+        markedRead: false,
+      };
+    }
+
+    let markedRead = Boolean(row.read_at);
+    if (data.markRead && !row.read_at) {
+      const { error: readErr } = await context.supabase
+        .from("notifications")
+        .update({ read_at: new Date().toISOString() })
+        .eq("id", row.id)
+        .eq("user_id", context.userId);
+      if (!readErr) markedRead = true;
+    }
+
+    const resolved = resolveNotificationLink(row as any, actor, { protectedIds });
+    if (resolved.unavailable) {
+      return {
+        ok: true as const,
+        unavailable: true,
+        unavailableMessage: resolved.unavailableMessage ?? UNAVAILABLE_TARGET_MESSAGE,
+        to: resolved.fallbackTo ?? "/dashboard",
+        search: {} as Record<string, string>,
+        fallbackTo: resolved.fallbackTo ?? "/dashboard",
+        markedRead,
+      };
+    }
+
+    // Live existence + RLS visibility verification for structured UUID entities
+    const entityId = row.entity_id ?? null;
+    const isUuid =
+      typeof entityId === "string" &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(entityId);
+    let targetExists = true;
+
+    if (isUuid && !resolved.isHistoricalFallback) {
+      const sb = context.supabase as any;
+      if (resolved.to === "/requests") {
+        const tbl = resolved.search["breakRequestId"] ? "break_requests" : "requests";
+        const checkId = resolved.search["breakRequestId"] || resolved.search["requestId"] || entityId;
+        if (tbl === "requests") {
+          const { data: found } = await sb.from("requests").select("id").eq("id", checkId).maybeSingle();
+          targetExists = Boolean(found);
+        }
+      } else if (resolved.to.startsWith("/workforce/")) {
+        const personId = resolved.to.slice("/workforce/".length);
+        const { data: found } = await sb.from("profiles").select("id").eq("id", personId).maybeSingle();
+        targetExists = Boolean(found);
+      } else if (resolved.to.startsWith("/projects/")) {
+        const projectId = resolved.to.slice("/projects/".length);
+        const { data: found } = await sb.from("projects").select("id").eq("id", projectId).maybeSingle();
+        targetExists = Boolean(found);
+      } else if (resolved.to === "/my-projects") {
+        const allocId = resolved.search["allocationId"] || entityId;
+        const { data: found } = await sb
+          .from("project_allocations")
+          .select("id")
+          .eq("id", allocId)
+          .maybeSingle();
+        targetExists = Boolean(found);
+      } else if (resolved.to === "/interviews" && resolved.search["interviewId"]) {
+        const { data: found } = await sb
+          .from("interviews")
+          .select("id")
+          .eq("id", resolved.search["interviewId"])
+          .maybeSingle();
+        targetExists = Boolean(found);
+      } else if (resolved.to.startsWith("/candidates/")) {
+        const candId = resolved.to.slice("/candidates/".length);
+        const { data: found } = await sb.from("candidates").select("id").eq("id", candId).maybeSingle();
+        targetExists = Boolean(found);
+      } else if (resolved.to === "/records" && resolved.search["recordId"]) {
+        const recordId = resolved.search["recordId"];
+        if (!recordId.startsWith("wf:")) {
+          const { data: found } = await sb
+            .from("employee_records")
+            .select("id")
+            .eq("id", recordId)
+            .maybeSingle();
+          targetExists = Boolean(found);
+        }
+      }
+    }
+
+    if (!targetExists) {
+      return {
+        ok: true as const,
+        unavailable: true,
+        unavailableMessage: UNAVAILABLE_TARGET_MESSAGE,
+        to: resolved.fallbackTo ?? "/dashboard",
+        search: {} as Record<string, string>,
+        fallbackTo: resolved.fallbackTo ?? "/dashboard",
+        markedRead,
+      };
+    }
+
+    return {
+      ok: true as const,
+      unavailable: false,
+      unavailableMessage: null,
+      to: resolved.to,
+      search: resolved.search,
+      fallbackTo: resolved.fallbackTo ?? resolved.to,
+      markedRead,
+    };
   });
 
 export {

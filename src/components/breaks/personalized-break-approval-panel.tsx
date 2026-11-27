@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { CheckCircle2, Clock, Filter, ShieldAlert, Sparkles, XCircle } from "lucide-react";
@@ -16,13 +16,21 @@ import {
 import { formatDurationHuman } from "@/lib/breaks/break-management";
 import { todayIso } from "@/lib/timezone";
 
-export function PersonalizedBreakApprovalPanel() {
+export function PersonalizedBreakApprovalPanel({
+  focusBreakRequestId,
+}: {
+  focusBreakRequestId?: string | null | undefined;
+}) {
   const actor = useActor();
   const queryClient = useQueryClient();
   const [busyId, setBusyId] = useState<string | null>(null);
   const [filter, setFilter] = useState<string>("pending");
   const [approvedMinutesMap, setApprovedMinutesMap] = useState<Record<string, number>>({});
   const [notesMap, setNotesMap] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (focusBreakRequestId) setFilter("all");
+  }, [focusBreakRequestId]);
 
   const isHrOrAdmin = actor.roles.some((r) => ["hr", "admin", "super_admin"].includes(r));
 
@@ -74,7 +82,7 @@ export function PersonalizedBreakApprovalPanel() {
   const pendingCount = requests.filter((r) => r.status === "pending").length;
 
   return (
-    <Card className="border-border">
+    <Card className="border-border" data-focus-id="section-breaks">
       <CardHeader className="pb-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
@@ -135,7 +143,11 @@ export function PersonalizedBreakApprovalPanel() {
               const currentMins = approvedMinutesMap[req.id] ?? defaultMins;
 
               return (
-                <div key={req.id} className="p-3.5 space-y-2.5 bg-card hover:bg-muted/10 transition-colors text-xs">
+                <div
+                  key={req.id}
+                  data-focus-id={req.id}
+                  className="p-3.5 space-y-2.5 bg-card hover:bg-muted/10 transition-colors text-xs"
+                >
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
                     <div className="space-y-0.5">
                       <div className="flex items-center gap-2">

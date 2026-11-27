@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useSearch } from "@tanstack/react-router";
 import { useQuery, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import { ArrowRight } from "lucide-react";
@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { AppShell } from "@/components/app-shell";
 import { errorToAccessScreen } from "@/components/access-denied";
 import { actorQueryOptions, useActor } from "@/hooks/use-actor";
+import { useNotificationFocus } from "@/hooks/use-notification-focus";
 import {
   cancelRequest,
   decideRequest,
@@ -146,6 +147,11 @@ function ApprovalTrail({ approvals }: { approvals: ApprovalRow[] }) {
 
 function RequestsPage() {
   const actor = useActor();
+  const search = useSearch({ strict: false }) as {
+    section?: string;
+    requestId?: string;
+    breakRequestId?: string;
+  };
   const queryClient = useQueryClient();
   const canSubmit = actor.can("requests:submit:self");
   const { data: mine } = useSuspenseQuery({
@@ -162,6 +168,12 @@ function RequestsPage() {
     queryFn: () => listRequestQueue(),
     enabled: canViewQueue,
   });
+
+  useNotificationFocus(
+    search.breakRequestId ||
+      search.requestId ||
+      (search.section ? `section-${search.section}` : null),
+  );
   const { data: routing } = useQuery({
     queryKey: ["request-routing"],
     queryFn: () => previewRequestRouting(),
@@ -256,7 +268,7 @@ function RequestsPage() {
       <div className={canSubmit ? "grid gap-6 lg:grid-cols-[minmax(0,1fr)_360px]" : "space-y-6"}>
         <div className="space-y-6">
           {canSubmit ? (
-            <Card>
+            <Card data-focus-id="section-mine">
               <CardHeader>
                 <CardTitle className="text-base">My requests</CardTitle>
                 <CardDescription>
@@ -271,7 +283,11 @@ function RequestsPage() {
                   const typeLabel =
                     REQUEST_TYPE_LABELS[request.request_type] ?? request.request_type;
                   return (
-                    <div key={request.id} className="space-y-2.5 rounded-md border p-3 text-sm">
+                    <div
+                      key={request.id}
+                      data-focus-id={request.id}
+                      className="space-y-2.5 rounded-md border p-3 text-sm"
+                    >
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <p className="font-medium">
                           {typeLabel} ·{" "}
@@ -309,10 +325,10 @@ function RequestsPage() {
           ) : null}
 
           {/* HR Personalized Break Approval Queue */}
-          <PersonalizedBreakApprovalPanel />
+          <PersonalizedBreakApprovalPanel focusBreakRequestId={search.breakRequestId} />
 
           {canViewQueue ? (
-            <Card>
+            <Card data-focus-id="section-approvals">
               <CardHeader>
                 <CardTitle className="text-base">
                   {actor.can("requests:approve:lead") || actor.can("requests:approve:hr")
@@ -341,7 +357,11 @@ function RequestsPage() {
                         (a.tier === "hr" && queue?.canHr)),
                   );
                   return (
-                    <div key={request.id} className="space-y-2.5 rounded-md border p-3 text-sm">
+                    <div
+                      key={request.id}
+                      data-focus-id={request.id}
+                      className="space-y-2.5 rounded-md border p-3 text-sm"
+                    >
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <p className="font-medium">
                           {person?.full_name ?? "Employee"} · {typeLabel} ·{" "}

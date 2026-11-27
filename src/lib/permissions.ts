@@ -237,6 +237,16 @@ export function canViewRecordConfidentialFields(
   );
 }
 
+/** Ensures a stored KYC object key strictly belongs to the owner's private prefix without traversal. */
+export function isValidOwnedDocumentPath(
+  ownerId: string,
+  filePath: string | null | undefined,
+): boolean {
+  if (!ownerId || !filePath || typeof filePath !== "string") return false;
+  if (filePath.includes("\\") || filePath.includes("..") || filePath.startsWith("/")) return false;
+  return filePath.startsWith(`${ownerId}/`) && filePath.length > ownerId.length + 2;
+}
+
 /**
  * Mutating historical Employee Records (create, edit, bulk import, Drive link matching,
  * Workforce sync reconciliation) is restricted to HR and Super Admin.

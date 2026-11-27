@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useSearch } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
@@ -19,7 +19,7 @@ import {
   SlidersHorizontal,
   Users,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { AccessDenied, errorToAccessScreen } from "@/components/access-denied";
 import { AppShell } from "@/components/app-shell";
@@ -94,13 +94,20 @@ const INITIAL_FILTERS: RecordsListFilters = {
 
 function EmployeeRecordsPage() {
   const actor = useActor();
+  const search = useSearch({ strict: false }) as { recordId?: string };
   const queryClient = useQueryClient();
   const allowed = actorCan(actor, "records:read:all");
 
   const [filters, setFilters] = useState<RecordsListFilters>(INITIAL_FILTERS);
   const [searchInput, setSearchInput] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [selectedRecordId, setSelectedRecordId] = useState<string | null>(null);
+  const [selectedRecordId, setSelectedRecordId] = useState<string | null>(search.recordId ?? null);
+
+  useEffect(() => {
+    if (search.recordId) {
+      setSelectedRecordId(search.recordId);
+    }
+  }, [search.recordId]);
   const [addOpen, setAddOpen] = useState(false);
   const [bulkOpen, setBulkOpen] = useState(false);
   const [driveOpen, setDriveOpen] = useState(false);

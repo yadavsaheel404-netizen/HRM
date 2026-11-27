@@ -1,10 +1,11 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useSearch } from "@tanstack/react-router";
 import { useSuspenseQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useId, useState } from "react";
 import { toast } from "sonner";
 import { AlertTriangle, ArrowLeft, Pencil, UserPlus, Users } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
 import { actorQueryOptions, useActor } from "@/hooks/use-actor";
+import { useNotificationFocus } from "@/hooks/use-notification-focus";
 import { errorToAccessScreen } from "@/components/access-denied";
 import { PROJECT_SHIFT_LABELS, optionsOf } from "@/lib/enums";
 import { getProject, updateProject } from "@/lib/projects.functions";
@@ -94,8 +95,12 @@ function parseOverAllocation(error: unknown): OverAllocation | null {
 
 function ProjectDetailPage() {
   const { projectId } = Route.useParams();
+  const search = useSearch({ strict: false }) as { section?: string; allocationId?: string };
   const actor = useActor();
   const queryClient = useQueryClient();
+  useNotificationFocus(
+    search.allocationId || (search.section ? `section-${search.section}` : null),
+  );
 
   const { data } = useSuspenseQuery({
     queryKey: ["project", projectId],
@@ -618,25 +623,27 @@ function ProjectDetailPage() {
             />
           ) : null}
 
-          <TeamAllocationsTable
-            projectId={projectId}
-            projectName={project.name}
-            projectDepartmentId={project.department_id}
-            projectDepartmentName={
-              reference.departments.find((d) => d.id === project.department_id)?.name ?? null
-            }
-            projectWorkType={project.work_type}
-            allocations={data.allocations as any}
-            availableLeads={allocatableData?.availableLeads ?? []}
-            canManage={canManageAllocations}
-            onRefresh={async () => {
-              await Promise.all([
-                queryClient.invalidateQueries({ queryKey: ["project", projectId] }),
-                queryClient.invalidateQueries({ queryKey: ["allocatable-employees", projectId] }),
-                queryClient.invalidateQueries({ queryKey: ["org-reference"] }),
-              ]);
-            }}
-          />
+          <div data-focus-id="section-allocations">
+            <TeamAllocationsTable
+              projectId={projectId}
+              projectName={project.name}
+              projectDepartmentId={project.department_id}
+              projectDepartmentName={
+                reference.departments.find((d) => d.id === project.department_id)?.name ?? null
+              }
+              projectWorkType={project.work_type}
+              allocations={data.allocations as any}
+              availableLeads={allocatableData?.availableLeads ?? []}
+              canManage={canManageAllocations}
+              onRefresh={async () => {
+                await Promise.all([
+                  queryClient.invalidateQueries({ queryKey: ["project", projectId] }),
+                  queryClient.invalidateQueries({ queryKey: ["allocatable-employees", projectId] }),
+                  queryClient.invalidateQueries({ queryKey: ["org-reference"] }),
+                ]);
+              }}
+            />
+          </div>
       </div>
     </AppShell>
   );

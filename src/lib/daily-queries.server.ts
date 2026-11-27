@@ -80,32 +80,68 @@ export async function resolveWorkLead(
   return { leadId: null, source: "none" };
 }
 
+import {
+  isSafeInternalActionUrl,
+  sanitizeNotificationMetadata,
+} from "./notifications/navigation";
+import { isMissingSchemaResourceError } from "./schema-compat.server";
+
 export async function notify(
   supabase: Client,
   entry: {
     userId: string;
-    actorId: string;
+    actorId: string | null;
     type: string;
     title: string;
     body?: string | null;
     entityType?: string | null;
     entityId?: string | null;
+    section?: string | null;
+    actionLabel?: string | null;
+    actionUrl?: string | null;
+    metadata?: Record<string, unknown> | null;
   },
 ): Promise<boolean> {
-  const { error } = await supabase.from("notifications").insert({
+  const safeUrl = isSafeInternalActionUrl(entry.actionUrl) ? entry.actionUrl.trim() : null;
+  const cleanMeta = sanitizeNotificationMetadata(entry.metadata);
+
+  const extendedPayload = {
     user_id: entry.userId,
-    actor_id: entry.actorId,
+    actor_id: entry.actorId ?? null,
     type: entry.type,
     title: entry.title,
     body: entry.body ?? null,
     entity_type: entry.entityType ?? null,
     entity_id: entry.entityId ?? null,
-  });
-  if (error) {
-    console.error("[notify] failed", entry.type, error.message);
+    section: entry.section ?? null,
+    action_label: entry.actionLabel ?? null,
+    action_url: safeUrl,
+    metadata: cleanMeta,
+  };
+
+  const { error } = await (supabase as unknown as SupabaseClient<any>)
+    .from("notifications")
+    .insert(extendedPayload);
+
+  if (!error) return true;
+
+  if (isMissingSchemaResourceError(error)) {
+    const { error: baseErr } = await supabase.from("notifications").insert({
+      user_id: entry.userId,
+      actor_id: entry.actorId ?? null,
+      type: entry.type,
+      title: entry.title,
+      body: entry.body ?? null,
+      entity_type: entry.entityType ?? null,
+      entity_id: entry.entityId ?? null,
+    });
+    if (!baseErr) return true;
+    console.error("[notify] base fallback failed", entry.type, baseErr.message);
     return false;
   }
-  return true;
+
+  console.error("[notify] failed", entry.type, error.message);
+  return false;
 }
 
 export async function loadDay(supabase: Client, userId: string, workDate: string) {

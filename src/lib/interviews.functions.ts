@@ -347,6 +347,9 @@ export const scheduleInterview = createServerFn({ method: "POST" })
             body: `${data.roundName} (${candidate.designation ?? "Candidate"}) on ${slot.dateLabel} · ${slot.timeRangeLabel}`,
             entityType: "interview",
             entityId: created.id,
+            actionLabel: "Open Interview",
+            actionUrl: `/interviews?interviewId=${created.id}`,
+            metadata: { candidateId: candidate.id },
           }),
         ),
     );
@@ -489,6 +492,9 @@ export const updateInterviewLifecycle = createServerFn({ method: "POST" })
             body: `${existing.round_name}${data.reason ? ` — ${data.reason}` : ""}`,
             entityType: "interview",
             entityId: existing.id,
+            actionLabel: "Open Interview",
+            actionUrl: `/interviews?interviewId=${existing.id}`,
+            metadata: { candidateId: existing.candidate_id },
           }),
         ),
       );
@@ -611,6 +617,10 @@ export const submitInterviewFeedback = createServerFn({ method: "POST" })
         body: `${actor.fullName} rated ${data.rating}/5 (${INTERVIEW_RECOMMENDATION_LABELS[data.recommendation]})`,
         entityType: "candidate",
         entityId: interview.candidate_id,
+        section: "interviews",
+        actionLabel: "View Scorecard",
+        actionUrl: `/candidates/${interview.candidate_id}?section=interviews`,
+        metadata: { candidateId: interview.candidate_id, interviewId: interview.id },
       });
     }
 

@@ -1,6 +1,7 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useSearch } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useNotificationFocus } from "@/hooks/use-notification-focus";
 import {
   Award,
   CheckCircle2,
@@ -66,10 +67,16 @@ export const Route = createFileRoute("/_authenticated/employee-relieving")({
 
 function EmployeeRelievingPage() {
   const actor = useActor();
+  const search = useSearch({ strict: false }) as { caseId?: string; tab?: string };
   const queryClient = useQueryClient();
 
-  const [activeTab, setActiveTab] = useState<string>("all");
+  const [activeTab, setActiveTab] = useState<string>(search.tab || "all");
   const [searchQuery, setSearchQuery] = useState<string>("");
+
+  useEffect(() => {
+    if (search.tab) setActiveTab(search.tab);
+    else if (search.caseId) setActiveTab("all");
+  }, [search.tab, search.caseId]);
 
   // Dialog states
   const [isInitiateOpen, setIsInitiateOpen] = useState(false);
@@ -125,6 +132,7 @@ function EmployeeRelievingPage() {
   });
 
   const cases = data?.cases || [];
+  useNotificationFocus(search.caseId, { ready: !isLoading });
   const metrics = data?.metrics || {
     total: 0,
     drafts: 0,
@@ -525,7 +533,11 @@ function EmployeeRelievingPage() {
                   </tr>
                 ) : (
                   (cases as RelievingCase[]).map((c: RelievingCase) => (
-                    <tr key={c.id} className="hover:bg-slate-50/70 transition-colors">
+                    <tr
+                      key={c.id}
+                      data-focus-id={c.id}
+                      className="hover:bg-slate-50/70 transition-colors"
+                    >
                       <td className="py-3.5 px-4">
                         <div className="font-semibold text-slate-900">{c.employeeName}</div>
                         <div className="text-xs text-slate-500">{c.workEmail}</div>

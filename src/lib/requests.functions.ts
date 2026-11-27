@@ -164,6 +164,10 @@ export const submitRequest = createServerFn({ method: "POST" })
         body: `${data.startDate} → ${data.endDate}: ${data.reason.trim()}`,
         entityType: "request",
         entityId: request.id,
+        section: "approvals",
+        actionLabel: "Review Request",
+        actionUrl: `/requests?section=approvals&requestId=${request.id}`,
+        metadata: { requestType: data.requestType, employeeId: userId },
       });
       if (ok) notified += 1;
     }
@@ -449,6 +453,10 @@ export const decideRequest = createServerFn({ method: "POST" })
       body: data.note?.trim() || null,
       entityType: "request",
       entityId: request.id,
+      section: "mine",
+      actionLabel: "View Request",
+      actionUrl: `/requests?section=mine&requestId=${request.id}`,
+      metadata: { requestType: request.request_type, status: overall },
     });
 
     await writeAudit(supabase, {

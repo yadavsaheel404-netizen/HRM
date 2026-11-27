@@ -1,4 +1,4 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, Link, useSearch } from "@tanstack/react-router";
 import { useQuery, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import {
   ArrowLeft,
@@ -13,6 +13,7 @@ import {
   UserCheck,
 } from "lucide-react";
 import { useState } from "react";
+import { useNotificationFocus } from "@/hooks/use-notification-focus";
 import { toast } from "sonner";
 import { errorToAccessScreen } from "@/components/access-denied";
 import { AppShell } from "@/components/app-shell";
@@ -92,8 +93,10 @@ export const Route = createFileRoute("/_authenticated/candidates/$candidateId")(
 function CandidateDetailPage() {
   useSuspenseQuery(actorQueryOptions);
   const { candidateId } = Route.useParams();
+  const search = useSearch({ strict: false }) as { section?: string };
   const actor = useActor();
   const queryClient = useQueryClient();
+  useNotificationFocus(search.section ? `section-${search.section}` : null);
 
   const canManage = actor.can("recruitment:manage:all");
   const canScheduleIv = actor.can("interviews:manage:all");
@@ -798,7 +801,7 @@ function CandidateDetailPage() {
         {/* Right 2 Columns: Interviews & Scorecards + Activity & Email Timeline */}
         <div className="space-y-6 lg:col-span-2">
           {/* Interviews & Scorecards */}
-          <Card>
+          <Card data-focus-id="section-interviews">
             <CardHeader className="pb-3">
               <CardTitle className="font-display text-base font-semibold">
                 Interviews &amp; Hiring Scorecards ({detail.interviews.length})
@@ -896,7 +899,7 @@ function CandidateDetailPage() {
 
           {/* Notes & Activity History */}
           {detail.accessMode === "full" && (
-            <Card>
+            <Card data-focus-id="section-timeline">
               <CardHeader className="pb-3">
                 <CardTitle className="font-display text-base font-semibold">
                   Notes &amp; Activity History

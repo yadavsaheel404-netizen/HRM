@@ -1,4 +1,4 @@
-import { createFileRoute, Link, useParams } from "@tanstack/react-router";
+import { createFileRoute, Link, useParams, useSearch } from "@tanstack/react-router";
 import { useQuery, useQueryClient, useSuspenseQuery } from "@tanstack/react-query";
 import { ArrowLeft, Copy } from "lucide-react";
 import { useState } from "react";
@@ -36,6 +36,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { actorQueryOptions, useActor } from "@/hooks/use-actor";
+import { useNotificationFocus } from "@/hooks/use-notification-focus";
 import { getDocumentDownloadUrl, reviewDocument } from "@/lib/documents.functions";
 import { KycNotificationPanel } from "@/components/profile/kyc-notification-panel";
 import {
@@ -78,10 +79,15 @@ type WorkforceMemberResult = Awaited<ReturnType<typeof getWorkforceMember>>;
 
 function PersonPage() {
   const { personId } = useParams({ from: "/_authenticated/workforce/$personId" });
+  const search = useSearch({ strict: false }) as { section?: string; docId?: string };
   const { data } = useSuspenseQuery({
     queryKey: ["workforce-member", personId],
     queryFn: () => getWorkforceMember({ data: { id: personId } }),
   });
+
+  useNotificationFocus(
+    search.docId || (search.section ? `section-${search.section}` : null),
+  );
 
   // Keying by personId guarantees fresh form, role, and dialog state when navigating
   // between employee profiles (e.g. clicking a Reporting Lead link).

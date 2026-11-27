@@ -240,6 +240,7 @@ function EmailCenterPage() {
   const [selectedCustomTemplateId, setSelectedCustomTemplateId] = useState<string | null>(null);
   const [customWorkspaceSubTab, setCustomWorkspaceSubTab] =
     useState<CustomWorkspaceSubTab>("library");
+  const [pendingSidebarUploadFile, setPendingSidebarUploadFile] = useState<File | null>(null);
 
   // Template editor state
   const [selectedSlug, setSelectedSlug] = useState<string>("application_received");
@@ -1099,17 +1100,24 @@ function EmailCenterPage() {
                             <span>+ Create Custom Template</span>
                             <Badge variant="outline" className="text-[9px]">New</Badge>
                           </button>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setCustomModeActive(true);
-                              setCustomWorkspaceSubTab("compose");
-                            }}
-                            className="flex w-full items-center justify-between rounded-md border border-border/80 bg-card px-2.5 py-1.5 text-left text-xs font-medium text-foreground transition-colors hover:border-primary hover:bg-primary/5"
-                          >
+                          <label className="flex w-full cursor-pointer items-center justify-between rounded-md border border-border/80 bg-card px-2.5 py-1.5 text-left text-xs font-medium text-foreground transition-colors hover:border-primary hover:bg-primary/5">
                             <span>Upload Word / PDF</span>
                             <Badge variant="outline" className="text-[9px]">Private</Badge>
-                          </button>
+                            <input
+                              type="file"
+                              accept=".docx,.pdf,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                              className="sr-only"
+                              onChange={(e) => {
+                                const file = e.target.files?.[0] ?? null;
+                                e.target.value = "";
+                                if (!file) return;
+                                setCustomModeActive(true);
+                                setSelectedCustomTemplateId(null);
+                                setCustomWorkspaceSubTab("compose");
+                                setPendingSidebarUploadFile(file);
+                              }}
+                            />
+                          </label>
                         </>
                       ) : null}
                       <button
@@ -1118,11 +1126,10 @@ function EmailCenterPage() {
                           setCustomModeActive(true);
                           setCustomWorkspaceSubTab("library");
                         }}
-                        className={`flex w-full items-center justify-between rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors ${
-                          customModeActive && !selectedCustomTemplateId
-                            ? "border-primary bg-primary/10 font-semibold text-primary"
-                            : "border-border/60 bg-card text-muted-foreground hover:bg-muted/40 hover:text-foreground"
-                        }`}
+                        className={`flex w-full items-center justify-between rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors ${customModeActive && !selectedCustomTemplateId
+                          ? "border-primary bg-primary/10 font-semibold text-primary"
+                          : "border-border/60 bg-card text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+                          }`}
                       >
                         <span>Manage Templates</span>
                         <span className="font-mono text-[10px]">
@@ -1140,11 +1147,10 @@ function EmailCenterPage() {
                               setSelectedCustomTemplateId(ct.id);
                               setCustomWorkspaceSubTab("compose");
                             }}
-                            className={`flex w-full items-center justify-between rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors ${
-                              isSelected
-                                ? "border-primary bg-primary/10 font-semibold text-primary"
-                                : "border-border/60 bg-card text-muted-foreground hover:bg-muted/40 hover:text-foreground"
-                            }`}
+                            className={`flex w-full items-center justify-between rounded-md border px-2.5 py-1.5 text-left text-xs transition-colors ${isSelected
+                              ? "border-primary bg-primary/10 font-semibold text-primary"
+                              : "border-border/60 bg-card text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+                              }`}
                           >
                             <span className="truncate pr-1.5">{ct.name}</span>
                             <Badge variant="outline" className="shrink-0 text-[9px] uppercase">
@@ -1168,6 +1174,8 @@ function EmailCenterPage() {
                   subTab={customWorkspaceSubTab}
                   onChangeSubTab={setCustomWorkspaceSubTab}
                   providerConfigured={providerConfigured}
+                  initialFileToUpload={pendingSidebarUploadFile}
+                  onConsumedInitialFile={() => setPendingSidebarUploadFile(null)}
                   onBatchUpdated={() => {
                     void dispatchBatchesQuery.refetch();
                     void refreshCenter();

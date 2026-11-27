@@ -96,6 +96,8 @@ interface CustomTemplatesWorkspaceProps {
   subTab: CustomWorkspaceSubTab;
   onChangeSubTab: (tab: CustomWorkspaceSubTab) => void;
   providerConfigured: boolean;
+  initialFileToUpload?: File | null | undefined;
+  onConsumedInitialFile?: (() => void) | undefined;
   onBatchUpdated?: (batch: EmailDispatchBatchRecord) => void;
 }
 
@@ -115,9 +117,13 @@ export function CustomTemplatesWorkspace({
   subTab,
   onChangeSubTab,
   providerConfigured,
+  initialFileToUpload,
+  onConsumedInitialFile,
   onBatchUpdated,
 }: CustomTemplatesWorkspaceProps) {
   const queryClient = useQueryClient();
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [isDragOver, setIsDragOver] = useState(false);
 
   const tplQuery = useQuery({
     queryKey: ["custom-email-templates"],
@@ -301,11 +307,27 @@ export function CustomTemplatesWorkspace({
             : STATIC_PDF_WARNING_MESSAGE,
         );
       }
+      if (!activeTemplate && !name.trim()) {
+        const derivedName = validation.safeFileName
+          .replace(/\.[^.]+$/, "")
+          .replace(/[_-]+/g, " ")
+          .trim();
+        if (derivedName) {
+          setName(derivedName);
+        }
+      }
       setClearAttachment(false);
+      onChangeSubTab("compose");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed inspecting uploaded file.");
     }
   };
+
+  useEffect(() => {
+    if (!initialFileToUpload) return;
+    void handleFilePicked(initialFileToUpload);
+    onConsumedInitialFile?.();
+  }, [initialFileToUpload]);
 
   const handleSaveTemplate = async (overrideStatus?: CustomTemplateStatus) => {
     setSaving(true);
@@ -547,6 +569,16 @@ export function CustomTemplatesWorkspace({
       </CardHeader>
 
       <CardContent className="space-y-4">
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".docx,.pdf,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+          className="sr-only"
+          onChange={(e) => {
+            void handleFilePicked(e.target.files?.[0] ?? null);
+            e.target.value = "";
+          }}
+        />
         <Tabs value={subTab} onValueChange={(v) => onChangeSubTab(v as CustomWorkspaceSubTab)}>
           <TabsList className="flex flex-wrap h-auto">
             <TabsTrigger value="library" className="text-xs">
@@ -572,13 +604,23 @@ export function CustomTemplatesWorkspace({
           {/* 1. TEMPLATE LIBRARY */}
           <TabsContent value="library" className="pt-3 space-y-3">
             {templates.length === 0 ? (
-              <div className="rounded-lg border border-dashed border-border p-8 text-center text-xs text-muted-foreground space-y-2">
+              <div className="rounded-lg border border-dashed border-border p-8 text-center text-xs text-muted-foreground space-y-2.5">
                 <p>No custom Word/PDF email templates saved yet.</p>
                 {canManage ? (
-                  <Button type="button" size="sm" variant="outline" onClick={startNewTemplate}>
-                    <Upload className="mr-1.5 size-3.5" />
-                    Upload First DOCX / PDF Template
-                  </Button>
+                  <div className="flex flex-wrap items-center justify-center gap-2">
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="outline"
+                      onClick={() => {
+                        onSelectTemplateId(null);
+                        fileInputRef.current?.click();
+                      }}
+                    >
+                      <Upload className="mr-1.5 size-3.5 text-primary" />
+                      Upload First DOCX / PDF Template
+                    </Button>
+                  </div>
                 ) : null}
               </div>
             ) : (
@@ -637,6 +679,114 @@ export function CustomTemplatesWorkspace({
 
           {/* 2. UPLOAD & COMPOSE */}
           <TabsContent value="compose" className="pt-3 space-y-4">
+            {/* Private DOCX / PDF Attachment Upload (Primary Dropzone + File Picker at top) */}
+            <div
+              onDragOver={(e) => {
+                if (!canManage) return;
+                e.preventDefault();
+                setIsDragOver(true);
+              }}
+              onDragLeave={() => setIsDragOver(false)}
+              onDrop={(e) => {
+                if (!canManage) return;
+                e.preventDefault();
+                setIsDragOver(false);
+                const dropped = e.dataTransfer.files?.[0] ?? null;
+                void handleFilePicked(dropped);
+              }}
+              className={`rounded-lg border-2 border-dashed p-3.5 space-y-2.5 text-xs transition-colors ${
+                isDragOver
+                  ? "border-primary bg-primary/10"
+                  : "border-border bg-muted/20"
+              }`}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <p className="font-semibold text-foreground">
+                    Attachment Template Upload (.docx Word or .pdf — max 10 MB, Private Bucket)
+                  </p>
+                  <p className="text-[11px] text-muted-foreground">
+                    Drag &amp; drop a file here or click Choose File. Word documents preserve logos, headers/footers, tables &amp; placeholders; PDFs are verified for fillable vs static mode.
+                  </p>
+                </div>
+                {canManage ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    <Upload className="mr-1.5 size-3.5 text-primary" />
+                    Choose .docx or .pdf File
+                  </Button>
+                ) : null}
+              </div>
+
+              {pendingUpload ? (
+                <div className="rounded border border-primary/40 bg-primary/5 p-2.5 space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="font-medium">
+                      Ready to upload: <code>{pendingUpload.fileName}</code> (
+                      {pendingUpload.format.toUpperCase()})
+                    </span>
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      className="h-6 px-2 text-[11px]"
+                      onClick={() => setPendingUpload(null)}
+                    >
+                      Discard
+                    </Button>
+                  </div>
+                  {pendingUpload.warning ? (
+                    <div className="flex items-start gap-1.5 text-amber-800 dark:text-amber-200">
+                      <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-amber-600" />
+                      <span>{pendingUpload.warning}</span>
+                    </div>
+                  ) : null}
+                  {pendingUpload.detectedPlaceholders.length > 0 ? (
+                    <div className="text-[11px]">
+                      Detected document placeholders:{" "}
+                      {pendingUpload.detectedPlaceholders.map((p) => (
+                        <code key={p} className="mr-1 rounded bg-background px-1 py-0.5">
+                          {`{{${p}}}`}
+                        </code>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ) : activeTemplate?.attachmentFilename && !clearAttachment ? (
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded border border-border bg-background p-2.5">
+                  <div className="space-y-1">
+                    <div>
+                      Stored attachment: <code>{activeTemplate.attachmentFilename}</code> (
+                      {activeTemplate.attachmentFormat.toUpperCase()}
+                      {activeTemplate.pdfMode ? ` • ${activeTemplate.pdfMode}` : ""})
+                    </div>
+                    {activeTemplate.attachmentFormat === "pdf" &&
+                    activeTemplate.pdfMode === "static" ? (
+                      <div className="flex items-center gap-1.5 text-[11px] text-amber-700 dark:text-amber-300">
+                        <AlertTriangle className="size-3.5 shrink-0" />
+                        <span>{STATIC_PDF_WARNING_MESSAGE}</span>
+                      </div>
+                    ) : null}
+                  </div>
+                  {canManage ? (
+                    <Button
+                      type="button"
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 text-[11px] text-destructive"
+                      onClick={() => setClearAttachment(true)}
+                    >
+                      Remove Attachment
+                    </Button>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 text-xs">
               <div className="space-y-1">
                 <Label htmlFor="ct-name">Template Name *</Label>
@@ -748,99 +898,6 @@ export function CustomTemplatesWorkspace({
                   </code>
                 ))}
               </span>
-            </div>
-
-            {/* Private DOCX / PDF Attachment Upload */}
-            <div className="rounded-lg border border-border bg-muted/20 p-3.5 space-y-2.5 text-xs">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div>
-                  <p className="font-semibold text-foreground">
-                    Attachment Template Upload (.docx Word or .pdf — max 10 MB, Private Bucket)
-                  </p>
-                  <p className="text-[11px] text-muted-foreground">
-                    Word documents preserve logos, headers/footers, tables &amp; split-run placeholders. PDFs are checked for fillable AcroForm fields vs static attachments.
-                  </p>
-                </div>
-                {canManage ? (
-                  <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-md border border-input bg-background px-3 py-1.5 text-xs font-medium hover:bg-muted">
-                    <Upload className="size-3.5 text-primary" />
-                    <span>Upload Word / PDF</span>
-                    <input
-                      type="file"
-                      accept=".docx,.pdf,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                      className="sr-only"
-                      onChange={(e) => {
-                        void handleFilePicked(e.target.files?.[0] ?? null);
-                        e.target.value = "";
-                      }}
-                    />
-                  </label>
-                ) : null}
-              </div>
-
-              {pendingUpload ? (
-                <div className="rounded border border-primary/40 bg-primary/5 p-2.5 space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <span className="font-medium">
-                      Ready to upload: <code>{pendingUpload.fileName}</code> (
-                      {pendingUpload.format.toUpperCase()})
-                    </span>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      className="h-6 px-2 text-[11px]"
-                      onClick={() => setPendingUpload(null)}
-                    >
-                      Discard
-                    </Button>
-                  </div>
-                  {pendingUpload.warning ? (
-                    <div className="flex items-start gap-1.5 text-amber-800 dark:text-amber-200">
-                      <AlertTriangle className="mt-0.5 size-3.5 shrink-0 text-amber-600" />
-                      <span>{pendingUpload.warning}</span>
-                    </div>
-                  ) : null}
-                  {pendingUpload.detectedPlaceholders.length > 0 ? (
-                    <div className="text-[11px]">
-                      Detected document placeholders:{" "}
-                      {pendingUpload.detectedPlaceholders.map((p) => (
-                        <code key={p} className="mr-1 rounded bg-background px-1 py-0.5">
-                          {`{{${p}}}`}
-                        </code>
-                      ))}
-                    </div>
-                  ) : null}
-                </div>
-              ) : activeTemplate?.attachmentFilename && !clearAttachment ? (
-                <div className="flex flex-wrap items-center justify-between gap-2 rounded border border-border bg-background p-2.5">
-                  <div className="space-y-1">
-                    <div>
-                      Stored attachment: <code>{activeTemplate.attachmentFilename}</code> (
-                      {activeTemplate.attachmentFormat.toUpperCase()}
-                      {activeTemplate.pdfMode ? ` • ${activeTemplate.pdfMode}` : ""})
-                    </div>
-                    {activeTemplate.attachmentFormat === "pdf" &&
-                    activeTemplate.pdfMode === "static" ? (
-                      <div className="flex items-center gap-1.5 text-[11px] text-amber-700 dark:text-amber-300">
-                        <AlertTriangle className="size-3.5 shrink-0" />
-                        <span>{STATIC_PDF_WARNING_MESSAGE}</span>
-                      </div>
-                    ) : null}
-                  </div>
-                  {canManage ? (
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      className="h-7 text-[11px] text-destructive"
-                      onClick={() => setClearAttachment(true)}
-                    >
-                      Remove Attachment
-                    </Button>
-                  ) : null}
-                </div>
-              ) : null}
             </div>
 
             {/* Settings + Save Actions */}
